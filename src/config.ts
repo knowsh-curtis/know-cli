@@ -9,6 +9,9 @@
  */
 export const DEFAULTS = {
   auth0Domain: 'dev-hcpmhp1w4f2455pb.us.auth0.com',
+  // know.sh CLI — Native application, no client secret, uses
+  // OAuth 2.0 Device Authorization Flow (RFC 8628). Auth0's own
+  // recommendation for CLIs; avoids the loopback port-match quirks.
   auth0ClientId: 'rEsn27jbd8IAD7k1JkRsES3pEKFwyjJd',
   audience: 'https://mcp.know.sh',
   scopes: [

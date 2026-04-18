@@ -1,11 +1,12 @@
 /**
- * Authorization Code + PKCE against Auth0 with a loopback redirect_uri.
- * Returns the token set on success; rejects with a clean message otherwise.
+ * Device Authorization Flow (RFC 8628) against Auth0. No loopback listener,
+ * no callback URL matching drama. Works on headless machines too.
+ *
+ * Auth0's documented recommendation for CLIs; `auth0/auth0-cli` uses it and
+ * the older `auth0/k8s-pixy-auth` (loopback + PKCE) was archived in favor of
+ * this flow.
  */
-import http from 'node:http';
-import { AddressInfo } from 'node:net';
 import open from 'open';
-import { codeChallenge, generateCodeVerifier, randomState } from './pkce.js';
 import type { TokenSet } from './tokens.js';
 
 export interface OAuthParams {
@@ -13,143 +14,152 @@ export interface OAuthParams {
   auth0ClientId: string;
   audience: string;
   scopes: string;
-  /** 'localhost' or '127.0.0.1'. Auth0 Native apps accept either without a port. */
-  loopbackHost?: string;
 }
 
 function parseExpiresAt(expiresInSec: number): number {
   return Math.floor(Date.now() / 1000) + Math.max(0, expiresInSec - 30);
 }
 
-function iss(domain: string): string {
-  return domain.startsWith('http') ? domain.replace(/\/+$/, '') + '/'
-    : `https://${domain}/`;
+function normalizeDomain(domain: string): string {
+  return domain.replace(/^https?:\/\//, '').replace(/\/+$/, '');
 }
 
-export async function loginWithPkce(params: OAuthParams): Promise<TokenSet> {
-  const host = params.loopbackHost ?? '127.0.0.1';
-  const verifier = generateCodeVerifier();
-  const challenge = codeChallenge(verifier);
-  const state = randomState();
+function iss(domain: string): string {
+  return `https://${normalizeDomain(domain)}/`;
+}
 
-  // Spin up a loopback listener on an ephemeral port before starting the browser.
-  // Auth0 Native apps allow any port on http://localhost or http://127.0.0.1 so
-  // long as the path matches the registered callback (/callback in our app).
-  const server = http.createServer();
-  await new Promise<void>((resolve, reject) => {
-    server.on('error', reject);
-    server.listen(0, host, () => resolve());
-  });
-  const port = (server.address() as AddressInfo).port;
-  const redirectUri = `http://${host}:${port}/callback`;
+interface DeviceCodeResponse {
+  device_code: string;
+  user_code: string;
+  verification_uri: string;
+  verification_uri_complete: string;
+  expires_in: number;
+  interval: number;
+}
 
-  const auth0Domain = params.auth0Domain.replace(/^https?:\/\//, '').replace(/\/+$/, '');
-  const authorizeUrl = new URL(`https://${auth0Domain}/authorize`);
-  authorizeUrl.searchParams.set('client_id', params.auth0ClientId);
-  authorizeUrl.searchParams.set('redirect_uri', redirectUri);
-  authorizeUrl.searchParams.set('response_type', 'code');
-  authorizeUrl.searchParams.set('scope', params.scopes);
-  authorizeUrl.searchParams.set('audience', params.audience);
-  authorizeUrl.searchParams.set('state', state);
-  authorizeUrl.searchParams.set('code_challenge', challenge);
-  authorizeUrl.searchParams.set('code_challenge_method', 'S256');
-  authorizeUrl.searchParams.set('prompt', 'login');
+interface TokenResponse {
+  access_token: string;
+  refresh_token?: string;
+  id_token?: string;
+  expires_in: number;
+  token_type: 'Bearer';
+  scope?: string;
+}
 
-  const codePromise = new Promise<string>((resolve, reject) => {
-    server.on('request', (req, res) => {
-      if (!req.url) return;
-      const url = new URL(req.url, `http://${host}:${port}`);
-      if (url.pathname !== '/callback') {
-        res.writeHead(404).end();
-        return;
-      }
-      const returnedState = url.searchParams.get('state');
-      const code = url.searchParams.get('code');
-      const error = url.searchParams.get('error');
-      const errorDesc = url.searchParams.get('error_description');
-
-      if (error) {
-        res.writeHead(400, { 'content-type': 'text/html' });
-        res.end(
-          `<html><body style="font-family:system-ui;padding:24px"><h2>know.sh login failed</h2><p><code>${escapeHtml(error)}</code>${errorDesc ? `: ${escapeHtml(errorDesc)}` : ''}</p><p>You can close this tab.</p></body></html>`,
-        );
-        reject(new Error(`authorization error: ${error}${errorDesc ? ` — ${errorDesc}` : ''}`));
-        return;
-      }
-      if (!code) {
-        res.writeHead(400).end('missing code');
-        reject(new Error('authorization response missing code'));
-        return;
-      }
-      if (returnedState !== state) {
-        res.writeHead(400).end('state mismatch');
-        reject(new Error('state mismatch (possible CSRF)'));
-        return;
-      }
-      res.writeHead(200, { 'content-type': 'text/html' });
-      res.end(
-        `<html><body style="font-family:system-ui;padding:24px"><h2>Signed in to know.sh</h2><p>You can close this tab and return to your terminal.</p></body></html>`,
-      );
-      resolve(code);
-    });
-  });
-
-  console.log('Opening your browser to sign in at know.sh…');
-  console.log(`If it does not open, visit: ${authorizeUrl.toString()}`);
-  try {
-    await open(authorizeUrl.toString());
-  } catch {
-    // fall through — the user can click the printed URL.
-  }
-
-  let code: string;
-  try {
-    code = await codePromise;
-  } finally {
-    server.close();
-  }
-
-  // Exchange the code for tokens.
-  const tokenRes = await fetch(`https://${auth0Domain}/oauth/token`, {
+async function requestDeviceCode(params: OAuthParams): Promise<DeviceCodeResponse> {
+  const domain = normalizeDomain(params.auth0Domain);
+  const res = await fetch(`https://${domain}/oauth/device/code`, {
     method: 'POST',
     headers: { 'content-type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams({
-      grant_type: 'authorization_code',
       client_id: params.auth0ClientId,
-      code,
-      redirect_uri: redirectUri,
-      code_verifier: verifier,
+      scope: params.scopes,
+      audience: params.audience,
     }),
   });
-  if (!tokenRes.ok) {
-    const text = await tokenRes.text().catch(() => '');
-    throw new Error(`token exchange failed: ${tokenRes.status} ${text}`);
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    throw new Error(`device code request failed: ${res.status} ${text}`);
   }
-  const payload = (await tokenRes.json()) as {
-    access_token: string;
-    refresh_token?: string;
-    id_token?: string;
-    expires_in: number;
-    token_type: 'Bearer';
-    scope?: string;
-  };
+  return (await res.json()) as DeviceCodeResponse;
+}
+
+async function pollForTokens(
+  params: OAuthParams,
+  deviceCode: string,
+  intervalSec: number,
+  expiresInSec: number,
+): Promise<TokenResponse> {
+  const domain = normalizeDomain(params.auth0Domain);
+  const deadline = Date.now() + expiresInSec * 1000;
+  let interval = Math.max(intervalSec, 5) * 1000;
+
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, interval));
+    const res = await fetch(`https://${domain}/oauth/token`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        grant_type: 'urn:ietf:params:oauth:grant-type:device_code',
+        device_code: deviceCode,
+        client_id: params.auth0ClientId,
+      }),
+    });
+    const body = (await res.json()) as Partial<TokenResponse> & {
+      error?: string;
+      error_description?: string;
+    };
+    if (res.ok && body.access_token) {
+      return body as TokenResponse;
+    }
+    switch (body.error) {
+      case 'authorization_pending':
+        // User hasn't finished yet — keep polling at the current interval.
+        break;
+      case 'slow_down':
+        // Spec-compliant back-off: bump interval by 5 seconds.
+        interval += 5_000;
+        break;
+      case 'expired_token':
+        throw new Error('device code expired — run `know login` again');
+      case 'access_denied':
+        throw new Error('authorization denied by user');
+      default:
+        throw new Error(
+          `token poll failed: ${body.error ?? res.status} ${body.error_description ?? ''}`,
+        );
+    }
+  }
+  throw new Error('device code timed out before user authorized');
+}
+
+export async function loginWithDeviceFlow(params: OAuthParams): Promise<TokenSet> {
+  const device = await requestDeviceCode(params);
+
+  // Present the user code prominently; most CLIs print both the URL and the
+  // code so users on headless shells can type them on another device.
+  console.log('');
+  console.log('To authorize this CLI, visit:');
+  console.log(`  ${device.verification_uri_complete}`);
+  console.log('');
+  console.log('Verify this code matches the one shown in your browser:');
+  console.log(`  ${device.user_code}`);
+  console.log('');
+  console.log('Waiting for you to finish signing in…');
+
+  try {
+    await open(device.verification_uri_complete);
+  } catch {
+    // User can click the URL manually.
+  }
+
+  const tokens = await pollForTokens(
+    params,
+    device.device_code,
+    device.interval,
+    device.expires_in,
+  );
+
   return {
-    access_token: payload.access_token,
-    refresh_token: payload.refresh_token,
-    id_token: payload.id_token,
-    expires_at: parseExpiresAt(payload.expires_in),
-    token_type: payload.token_type,
-    scope: payload.scope,
+    access_token: tokens.access_token,
+    refresh_token: tokens.refresh_token,
+    id_token: tokens.id_token,
+    expires_at: parseExpiresAt(tokens.expires_in),
+    token_type: tokens.token_type,
+    scope: tokens.scope,
     iss: iss(params.auth0Domain),
   };
 }
+
+/** Back-compat alias so callers that say `loginWithPkce` keep working. */
+export const loginWithPkce = loginWithDeviceFlow;
 
 export async function refreshTokens(
   params: OAuthParams,
   refreshToken: string,
 ): Promise<TokenSet> {
-  const auth0Domain = params.auth0Domain.replace(/^https?:\/\//, '').replace(/\/+$/, '');
-  const res = await fetch(`https://${auth0Domain}/oauth/token`, {
+  const domain = normalizeDomain(params.auth0Domain);
+  const res = await fetch(`https://${domain}/oauth/token`, {
     method: 'POST',
     headers: { 'content-type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams({
@@ -163,14 +173,7 @@ export async function refreshTokens(
     const text = await res.text().catch(() => '');
     throw new Error(`refresh failed: ${res.status} ${text}`);
   }
-  const payload = (await res.json()) as {
-    access_token: string;
-    refresh_token?: string;
-    id_token?: string;
-    expires_in: number;
-    token_type: 'Bearer';
-    scope?: string;
-  };
+  const payload = (await res.json()) as TokenResponse;
   return {
     access_token: payload.access_token,
     refresh_token: payload.refresh_token ?? refreshToken,
@@ -180,16 +183,4 @@ export async function refreshTokens(
     scope: payload.scope,
     iss: iss(params.auth0Domain),
   };
-}
-
-function escapeHtml(s: string): string {
-  return s.replace(/[&<>"']/g, (c) => {
-    switch (c) {
-      case '&': return '&amp;';
-      case '<': return '&lt;';
-      case '>': return '&gt;';
-      case '"': return '&quot;';
-      default:  return '&#39;';
-    }
-  });
 }
