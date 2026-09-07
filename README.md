@@ -47,10 +47,17 @@ plus the eight MCP scopes; the host issues no `email` claim and grants no
 - The CLI's `client_id` is a PUBLIC identifier for a Native app (PKCE, no
   secret). Safe to distribute in the bundle.
 - Refresh tokens are one-time-use: every renewal rotates the handle, and
-  replaying a spent one revokes the whole family. The proxy therefore takes
-  one refresh at a time.
+  replaying a spent one revokes the whole family. Each MCP client runs its own
+  `mcp-proxy` over the same token file, so renewal is serialised by a lock file
+  (`tokens.json.lock`) and the file is re-read inside the lock: a proxy that
+  loses the race picks up the rotated handle instead of replaying a spent one.
 - A refused refresh (`invalid_grant`) clears the stored token set and starts a
-  fresh sign-in rather than looping on a dead handle.
+  fresh sign-in rather than looping on a dead handle — unless the token file
+  has meanwhile moved on to a different handle, which means another proxy
+  rotated it, and that one is adopted instead.
+- Tokens minted by a different issuer (an Auth0 set left over from the device
+  flow, say) are never presented to the configured host, neither for refresh
+  nor for revocation. They are cleared locally and a fresh sign-in starts.
 - The proxy never writes tokens to stdout or stderr, and sign-in prompts go to
   stderr so they cannot corrupt the JSON-RPC channel.
 - `~/.config/know.sh/tokens.json` is created with 0600 permissions.

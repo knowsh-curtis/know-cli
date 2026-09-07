@@ -311,6 +311,9 @@ export async function loginWithDeviceFlow(
   return toTokenSet(tokens, config);
 }
 
+/** Back-compat alias so callers that say `loginWithPkce` keep working. */
+export const loginWithPkce = loginWithDeviceFlow;
+
 async function refreshDeviceTokens(config: DeviceConfig, refreshToken: string): Promise<TokenSet> {
   const payload = await postForm(
     legacyEndpoints(config.auth0Domain).token,

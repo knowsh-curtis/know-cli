@@ -10,13 +10,17 @@
  * the stored handle.
  */
 import { issuerFor, resolveConfig, type CliConfig } from '../config.js';
+import { withFileLock } from '../lock.js';
 import { InvalidGrantError, login, refreshTokens } from '../oauth.js';
-import { clearTokens, loadTokens, saveTokens, type TokenSet } from '../tokens.js';
+import { clearTokens, loadTokens, saveTokens, tokensLockPath, type TokenSet } from '../tokens.js';
 import { createInterface } from 'node:readline';
+
+/** Renew this far ahead of expiry so a token cannot die in flight. */
+const FRESHNESS_FLOOR_SEC = 60;
 
 export interface LiveState {
   tokens: TokenSet;
-  /** Rotation is one-time-use, so two concurrent refreshes would revoke the family. */
+  /** The in-process half of the single flight; the lock file is the other half. */
   acquiring?: Promise<string>;
 }
 
@@ -24,37 +28,99 @@ export interface SessionDeps {
   config?: CliConfig;
   refresh?: typeof refreshTokens;
   signIn?: typeof login;
+  load?: typeof loadTokens;
   save?: typeof saveTokens;
   clear?: typeof clearTokens;
+  /** Serialises acquisition against the other proxies sharing `tokens.json`. */
+  lock?: <T>(run: () => Promise<T>) => Promise<T>;
 }
 
-function isUsable(tokens: TokenSet, config: CliConfig): boolean {
-  if (tokens.iss !== undefined && tokens.iss !== issuerFor(config)) return false;
-  return tokens.expires_at - Math.floor(Date.now() / 1000) > 60;
+const lockTokenFile = <T>(run: () => Promise<T>): Promise<T> => withFileLock(tokensLockPath(), run);
+
+function mintedByConfiguredIssuer(tokens: TokenSet, config: CliConfig): boolean {
+  return tokens.iss === undefined || tokens.iss === issuerFor(config);
 }
 
-async function acquireTokens(state: LiveState, deps: SessionDeps): Promise<string> {
-  const config = deps.config ?? resolveConfig();
-  const save = deps.save ?? saveTokens;
+function isFresh(tokens: TokenSet): boolean {
+  return tokens.expires_at - Math.floor(Date.now() / 1000) > FRESHNESS_FLOOR_SEC;
+}
+
+async function signInAgain(state: LiveState, config: CliConfig, deps: SessionDeps): Promise<string> {
+  const fresh = await (deps.signIn ?? login)(config);
+  state.tokens = fresh;
+  await (deps.save ?? saveTokens)(fresh);
+  return fresh.access_token;
+}
+
+/**
+ * Renew the handle while holding the token-file lock. Returns null when only an
+ * interactive sign-in can recover, which runs outside the lock because it waits
+ * on a human for up to five minutes.
+ */
+async function refreshUnderLock(
+  state: LiveState,
+  config: CliConfig,
+  deps: SessionDeps,
+): Promise<string | null> {
+  const load = deps.load ?? loadTokens;
+  const refresh = deps.refresh ?? refreshTokens;
+  const persist = async (renewed: TokenSet): Promise<string> => {
+    state.tokens = renewed;
+    await (deps.save ?? saveTokens)(renewed);
+    return renewed.access_token;
+  };
+
+  // Another proxy may have rotated the handle since this process read the file.
+  const onDisk = await load();
+  if (onDisk && mintedByConfiguredIssuer(onDisk, config)) {
+    state.tokens = onDisk;
+    if (isFresh(onDisk)) return onDisk.access_token;
+  }
+
   const handle = state.tokens.refresh_token;
   if (!handle) {
     throw new Error('stored access token is unusable and there is no refresh token — run `know login`');
   }
 
   try {
-    const renewed = await (deps.refresh ?? refreshTokens)(config, handle);
-    state.tokens = renewed;
-    await save(renewed);
-    return renewed.access_token;
+    return await persist(await refresh(config, handle));
   } catch (err) {
     if (!(err instanceof InvalidGrantError)) throw err;
-    await (deps.clear ?? clearTokens)();
   }
 
-  const fresh = await (deps.signIn ?? login)(config);
-  state.tokens = fresh;
-  await save(fresh);
-  return fresh.access_token;
+  // The handle is spent. If the file has moved on to a different one, a sibling
+  // rotated it while this process held the old copy: adopt that handle rather
+  // than deleting a credential which still works.
+  const rotated = await load();
+  if (
+    rotated?.refresh_token &&
+    rotated.refresh_token !== handle &&
+    mintedByConfiguredIssuer(rotated, config)
+  ) {
+    state.tokens = rotated;
+    try {
+      return await persist(await refresh(config, rotated.refresh_token));
+    } catch (err) {
+      if (!(err instanceof InvalidGrantError)) throw err;
+    }
+  }
+
+  await (deps.clear ?? clearTokens)();
+  return null;
+}
+
+async function acquireTokens(state: LiveState, deps: SessionDeps): Promise<string> {
+  const config = deps.config ?? resolveConfig();
+
+  // A handle from another issuer is that issuer's credential. It cannot be
+  // renewed here and must never be presented to a host that did not mint it.
+  if (!mintedByConfiguredIssuer(state.tokens, config)) {
+    await (deps.clear ?? clearTokens)();
+    return signInAgain(state, config, deps);
+  }
+
+  const renewed = await (deps.lock ?? lockTokenFile)(() => refreshUnderLock(state, config, deps));
+  return renewed ?? signInAgain(state, config, deps);
 }
 
 export async function ensureFreshTokens(
@@ -62,7 +128,7 @@ export async function ensureFreshTokens(
   deps: SessionDeps = {},
 ): Promise<string> {
   const config = deps.config ?? resolveConfig();
-  if (isUsable(state.tokens, config)) {
+  if (mintedByConfiguredIssuer(state.tokens, config) && isFresh(state.tokens)) {
     return state.tokens.access_token;
   }
   state.acquiring ??= acquireTokens(state, { ...deps, config }).finally(() => {

@@ -19,7 +19,14 @@ over a `127.0.0.1` loopback redirect, `know-cli-development`, and one RFC
 8707 `resource` (`https://mcp.dev.know.sh/`, trailing slash included) on
 every token request, which is what gives the access token its single
 audience. Refreshes name the same resource and no scope; the handle is
-one-time-use, so token acquisition is single-flight.
+one-time-use and a replay revokes the whole family, so token acquisition is
+single-flight both inside a process and between processes — every MCP client
+spawns its own `mcp-proxy` over one `tokens.json`, so the file lock in
+`src/lock.ts` is the half that matters.
+
+A stored handle belongs to the issuer that minted it. When `tokens.iss` is not
+the configured issuer the set is cleared and a sign-in starts; it is never
+presented for refresh or revocation.
 
 The Auth0 device-code flow survives behind `KNOWSH_LEGACY_DEVICE_FLOW`
 until that tenant retires — the identity host serves no device
