@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { after, before, describe, it } from 'node:test';
-import { DEFAULTS, type LoopbackConfig } from '../src/config.js';
+import { DEFAULTS, REQUEST_TIMEOUT_MS, type LoopbackConfig } from '../src/config.js';
 import {
   InvalidGrantError,
   buildAuthorizeUrl,
@@ -9,7 +9,12 @@ import {
   refreshTokens,
 } from '../src/oauth.js';
 import { codeChallenge, generateCodeVerifier } from '../src/pkce.js';
-import { startFakeIdentityHost, type FakeIdentityHost } from './fake-identity-host.js';
+import {
+  startBlackHoleHost,
+  startFakeIdentityHost,
+  type BlackHoleHost,
+  type FakeIdentityHost,
+} from './fake-identity-host.js';
 
 describe('authorize request', () => {
   const config: LoopbackConfig = {
@@ -19,6 +24,7 @@ describe('authorize request', () => {
     resource: DEFAULTS.resource,
     scopes: DEFAULTS.scopes,
     mcpUrl: DEFAULTS.mcpUrl,
+    requestTimeoutMs: REQUEST_TIMEOUT_MS,
   };
   const verifier = generateCodeVerifier();
   const url = new URL(
@@ -112,6 +118,36 @@ describe('token requests', () => {
 
   it('reports a rotated-away handle as invalid_grant', async () => {
     await assert.rejects(refreshTokens(host.config(), 'refresh-1'), InvalidGrantError);
+  });
+});
+
+describe('a host that accepts the connection and never answers', () => {
+  let blackHole: BlackHoleHost;
+
+  before(async () => {
+    blackHole = await startBlackHoleHost();
+  });
+
+  after(async () => {
+    await blackHole.close();
+  });
+
+  // `fetch` waits 300 s on its own. A refresh runs while the token-file lock is
+  // held, so an unbounded one outlives its lock and gets its handle replayed.
+  it('gives the token request a deadline of its own', async () => {
+    const config: LoopbackConfig = {
+      mode: 'loopback',
+      issuer: blackHole.issuer,
+      clientId: DEFAULTS.clientId,
+      resource: DEFAULTS.resource,
+      scopes: DEFAULTS.scopes,
+      mcpUrl: DEFAULTS.mcpUrl,
+      requestTimeoutMs: 200,
+    };
+
+    const started = Date.now();
+    await assert.rejects(refreshTokens(config, 'never-answered'), /refresh timed out after 200 ms/);
+    assert.ok(Date.now() - started < 5_000, 'the request outlived its deadline');
   });
 });
 

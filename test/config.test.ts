@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import {
   DEFAULTS,
+  REQUEST_TIMEOUT_MS,
   identityEndpoints,
   issuerFor,
   legacyDeviceFlowRequested,
@@ -34,6 +35,7 @@ describe('resolveConfig', () => {
       resource: 'https://mcp.dev.know.sh/',
       scopes: DEFAULTS.scopes,
       mcpUrl: 'https://mcp.dev.know.sh/mcp',
+      requestTimeoutMs: REQUEST_TIMEOUT_MS,
     });
   });
 
@@ -61,7 +63,15 @@ describe('resolveConfig', () => {
       resource: 'https://mcp.know.sh/',
       scopes: 'openid',
       mcpUrl: 'https://mcp.know.sh/mcp',
+      requestTimeoutMs: REQUEST_TIMEOUT_MS,
     });
+  });
+
+  it('bounds every request to the identity host', () => {
+    assert.equal(resolveConfig({}).requestTimeoutMs, REQUEST_TIMEOUT_MS);
+    assert.equal(resolveConfig({ KNOWSH_HTTP_TIMEOUT_MS: '2500' }).requestTimeoutMs, 2500);
+    assert.equal(resolveConfig({ KNOWSH_HTTP_TIMEOUT_MS: 'later' }).requestTimeoutMs, REQUEST_TIMEOUT_MS);
+    assert.equal(resolveConfig({ KNOWSH_HTTP_TIMEOUT_MS: '0' }).requestTimeoutMs, REQUEST_TIMEOUT_MS);
   });
 
   it('falls back to the Auth0 device flow only behind the legacy flag', () => {

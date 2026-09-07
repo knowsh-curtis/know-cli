@@ -72,6 +72,30 @@ describe('token file lock', () => {
     });
   });
 
+  it('keeps the lock while the work it guards outlives the staleness threshold', async () => {
+    const options = { staleMs: 150, waitMs: 5_000, pollMs: 10 };
+    let holders = 0;
+    let overlapped = false;
+    const hold = (workMs: number) =>
+      withFileLock(
+        lockPath,
+        async () => {
+          holders += 1;
+          overlapped ||= holders > 1;
+          await new Promise((resolve) => setTimeout(resolve, workMs));
+          holders -= 1;
+        },
+        options,
+      );
+
+    // Four staleness windows: a token request has no upper bound of its own, so
+    // a holder that cannot keep its lock alive is evicted while still inside it.
+    await Promise.all([hold(600), hold(10)]);
+
+    assert.equal(overlapped, false);
+    await assert.rejects(stat(lockPath), /ENOENT/);
+  });
+
   it('never deletes a lock that someone else took after ours was broken', async () => {
     await withFileLock(lockPath, async () => {
       await writeFile(lockPath, 'a-later-holder');

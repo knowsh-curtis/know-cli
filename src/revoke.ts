@@ -4,6 +4,7 @@
  * server-side sign-out rather than a local file deletion.
  */
 import { identityEndpoints, type LoopbackConfig } from './config.js';
+import { isTimeout, postForm, timedOut } from './http.js';
 
 export type TokenTypeHint = 'refresh_token' | 'access_token';
 
@@ -12,15 +13,17 @@ export async function revokeToken(
   token: string,
   hint: TokenTypeHint = 'refresh_token',
 ): Promise<void> {
-  const res = await fetch(identityEndpoints(config.issuer).revocation, {
-    method: 'POST',
-    headers: { 'content-type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({
-      token,
-      token_type_hint: hint,
-      client_id: config.clientId,
-    }),
-  });
+  let res: Response;
+  try {
+    res = await postForm(
+      identityEndpoints(config.issuer).revocation,
+      new URLSearchParams({ token, token_type_hint: hint, client_id: config.clientId }),
+      config.requestTimeoutMs,
+    );
+  } catch (err) {
+    if (!isTimeout(err)) throw err;
+    throw timedOut('revocation', config.requestTimeoutMs);
+  }
   if (!res.ok) {
     const text = await res.text().catch(() => '');
     throw new Error(`revocation failed: ${res.status} ${text}`.trim());

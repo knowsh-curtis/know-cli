@@ -17,6 +17,7 @@ import {
   type DeviceConfig,
   type LoopbackConfig,
 } from './config.js';
+import { isTimeout, postForm, timedOut } from './http.js';
 import { startLoopbackReceiver, type LoopbackReceiver } from './loopback.js';
 import { codeChallenge, generateCodeVerifier, randomNonce, randomState } from './pkce.js';
 import type { TokenSet } from './tokens.js';
@@ -67,16 +68,19 @@ async function readError(res: Response): Promise<ErrorResponse & { text: string 
   }
 }
 
-async function postForm(
+async function postTokenForm(
   endpoint: string,
   body: URLSearchParams,
   label: string,
+  timeoutMs: number,
 ): Promise<TokenResponse> {
-  const res = await fetch(endpoint, {
-    method: 'POST',
-    headers: { 'content-type': 'application/x-www-form-urlencoded', accept: 'application/json' },
-    body,
-  });
+  let res: Response;
+  try {
+    res = await postForm(endpoint, body, timeoutMs);
+  } catch (err) {
+    if (!isTimeout(err)) throw err;
+    throw timedOut(label, timeoutMs);
+  }
   if (!res.ok) {
     const failure = await readError(res);
     const detail = `${failure.error ?? res.status} ${failure.error_description ?? failure.text}`.trim();
@@ -133,7 +137,7 @@ export async function exchangeCode(
   config: LoopbackConfig,
   exchange: CodeExchange,
 ): Promise<TokenSet> {
-  const payload = await postForm(
+  const payload = await postTokenForm(
     identityEndpoints(config.issuer).token,
     new URLSearchParams({
       grant_type: 'authorization_code',
@@ -144,6 +148,7 @@ export async function exchangeCode(
       resource: config.resource,
     }),
     'code exchange',
+    config.requestTimeoutMs,
   );
   return toTokenSet(payload, config);
 }
@@ -200,7 +205,7 @@ export async function refreshTokens(config: CliConfig, refreshToken: string): Pr
   if (config.mode === 'device') {
     return refreshDeviceTokens(config, refreshToken);
   }
-  const payload = await postForm(
+  const payload = await postTokenForm(
     identityEndpoints(config.issuer).token,
     new URLSearchParams({
       grant_type: 'refresh_token',
@@ -209,6 +214,7 @@ export async function refreshTokens(config: CliConfig, refreshToken: string): Pr
       resource: config.resource,
     }),
     'refresh',
+    config.requestTimeoutMs,
   );
   return toTokenSet(payload, config, refreshToken);
 }
@@ -223,15 +229,21 @@ interface DeviceCodeResponse {
 }
 
 async function requestDeviceCode(config: DeviceConfig): Promise<DeviceCodeResponse> {
-  const res = await fetch(legacyEndpoints(config.auth0Domain).deviceCode, {
-    method: 'POST',
-    headers: { 'content-type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({
-      client_id: config.auth0ClientId,
-      scope: config.scopes,
-      audience: config.audience,
-    }),
-  });
+  let res: Response;
+  try {
+    res = await postForm(
+      legacyEndpoints(config.auth0Domain).deviceCode,
+      new URLSearchParams({
+        client_id: config.auth0ClientId,
+        scope: config.scopes,
+        audience: config.audience,
+      }),
+      config.requestTimeoutMs,
+    );
+  } catch (err) {
+    if (!isTimeout(err)) throw err;
+    throw timedOut('device code request', config.requestTimeoutMs);
+  }
   if (!res.ok) {
     const text = await res.text().catch(() => '');
     throw new Error(`device code request failed: ${res.status} ${text}`);
@@ -250,15 +262,22 @@ async function pollForTokens(
 
   while (Date.now() < deadline) {
     await new Promise((r) => setTimeout(r, interval));
-    const res = await fetch(legacyEndpoints(config.auth0Domain).token, {
-      method: 'POST',
-      headers: { 'content-type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({
-        grant_type: 'urn:ietf:params:oauth:grant-type:device_code',
-        device_code: deviceCode,
-        client_id: config.auth0ClientId,
-      }),
-    });
+    let res: Response;
+    try {
+      res = await postForm(
+        legacyEndpoints(config.auth0Domain).token,
+        new URLSearchParams({
+          grant_type: 'urn:ietf:params:oauth:grant-type:device_code',
+          device_code: deviceCode,
+          client_id: config.auth0ClientId,
+        }),
+        config.requestTimeoutMs,
+      );
+    } catch (err) {
+      // One slow poll is not a failed sign-in; the device code's own deadline bounds the loop.
+      if (isTimeout(err)) continue;
+      throw err;
+    }
     const body = (await res.json()) as Partial<TokenResponse> & ErrorResponse;
     if (res.ok && body.access_token) {
       return body as TokenResponse;
@@ -315,7 +334,7 @@ export async function loginWithDeviceFlow(
 export const loginWithPkce = loginWithDeviceFlow;
 
 async function refreshDeviceTokens(config: DeviceConfig, refreshToken: string): Promise<TokenSet> {
-  const payload = await postForm(
+  const payload = await postTokenForm(
     legacyEndpoints(config.auth0Domain).token,
     new URLSearchParams({
       grant_type: 'refresh_token',
@@ -324,6 +343,7 @@ async function refreshDeviceTokens(config: DeviceConfig, refreshToken: string): 
       scope: config.scopes,
     }),
     'refresh',
+    config.requestTimeoutMs,
   );
   return toTokenSet(payload, config, refreshToken);
 }

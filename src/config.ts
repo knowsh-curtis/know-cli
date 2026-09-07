@@ -49,6 +49,13 @@ export const LEGACY_DEFAULTS = {
   mcpUrl: 'https://mcp.know.sh/mcp',
 } as const;
 
+/**
+ * No request to the identity host may outlive this. It is the CLI's only
+ * deadline on a black-holed endpoint, and it keeps a token request from
+ * outliving the lock it is held under (`src/lock.ts`).
+ */
+export const REQUEST_TIMEOUT_MS = 15_000;
+
 export interface LoopbackConfig {
   mode: 'loopback';
   issuer: string;
@@ -56,6 +63,7 @@ export interface LoopbackConfig {
   resource: string;
   scopes: string;
   mcpUrl: string;
+  requestTimeoutMs: number;
 }
 
 export interface DeviceConfig {
@@ -65,6 +73,7 @@ export interface DeviceConfig {
   audience: string;
   scopes: string;
   mcpUrl: string;
+  requestTimeoutMs: number;
 }
 
 export type CliConfig = LoopbackConfig | DeviceConfig;
@@ -80,6 +89,11 @@ export function legacyDeviceFlowRequested(env: Env = process.env): boolean {
   return flagIsSet(env.KNOWSH_LEGACY_DEVICE_FLOW);
 }
 
+function positiveMilliseconds(value: string | undefined, fallback: number): number {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
 export function resolveConfig(env: Env = process.env): CliConfig {
   if (legacyDeviceFlowRequested(env)) {
     return {
@@ -89,6 +103,7 @@ export function resolveConfig(env: Env = process.env): CliConfig {
       audience: env.KNOWSH_AUDIENCE ?? LEGACY_DEFAULTS.audience,
       scopes: env.KNOWSH_SCOPES ?? LEGACY_DEFAULTS.scopes,
       mcpUrl: env.KNOWSH_MCP_URL ?? LEGACY_DEFAULTS.mcpUrl,
+      requestTimeoutMs: positiveMilliseconds(env.KNOWSH_HTTP_TIMEOUT_MS, REQUEST_TIMEOUT_MS),
     };
   }
   return {
@@ -98,6 +113,7 @@ export function resolveConfig(env: Env = process.env): CliConfig {
     resource: env.KNOWSH_RESOURCE ?? DEFAULTS.resource,
     scopes: env.KNOWSH_SCOPES ?? DEFAULTS.scopes,
     mcpUrl: env.KNOWSH_MCP_URL ?? DEFAULTS.mcpUrl,
+    requestTimeoutMs: positiveMilliseconds(env.KNOWSH_HTTP_TIMEOUT_MS, REQUEST_TIMEOUT_MS),
   };
 }
 

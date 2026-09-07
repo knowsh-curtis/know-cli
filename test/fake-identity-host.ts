@@ -1,6 +1,6 @@
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { DEFAULTS, type LoopbackConfig } from '../src/config.js';
+import { DEFAULTS, REQUEST_TIMEOUT_MS, type LoopbackConfig } from '../src/config.js';
 
 export interface RecordedRequest {
   path: string;
@@ -34,6 +34,24 @@ function json(res: http.ServerResponse, status: number, payload: unknown): void 
   const body = JSON.stringify(payload);
   res.writeHead(status, { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) });
   res.end(body);
+}
+
+export interface BlackHoleHost {
+  issuer: string;
+  close(): Promise<void>;
+}
+
+/** Accepts the connection and never answers, so a request's own deadline is all there is. */
+export async function startBlackHoleHost(): Promise<BlackHoleHost> {
+  const server = http.createServer(() => {});
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
+  return {
+    issuer: `http://127.0.0.1:${(server.address() as AddressInfo).port}`,
+    close: async () => {
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    },
+  };
 }
 
 export async function startFakeIdentityHost(): Promise<FakeIdentityHost> {
@@ -118,6 +136,8 @@ export async function startFakeIdentityHost(): Promise<FakeIdentityHost> {
       }
 
       if (path === '/connect/revocation') {
+        // FamilyRevokingTokenRevocationResponseGenerator: revoking one handle
+        // revokes its whole family, which is what makes logout a sign-out.
         const token = form.get('token') ?? '';
         handles.delete(token);
         const family = familyOf.get(token);
@@ -157,6 +177,7 @@ export async function startFakeIdentityHost(): Promise<FakeIdentityHost> {
       resource: DEFAULTS.resource,
       scopes: DEFAULTS.scopes,
       mcpUrl: DEFAULTS.mcpUrl,
+      requestTimeoutMs: REQUEST_TIMEOUT_MS,
       ...overrides,
     }),
     tokenRequests: (grantType: string) =>
