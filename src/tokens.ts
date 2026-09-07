@@ -27,6 +27,11 @@ export function tokensPath(): string {
   return path.join(tokensDir(), 'tokens.json');
 }
 
+/** Held while a process rotates the handle in `tokens.json`; see `src/lock.ts`. */
+export function tokensLockPath(): string {
+  return `${tokensPath()}.lock`;
+}
+
 export async function saveTokens(tokens: TokenSet): Promise<void> {
   const dir = tokensDir();
   await fs.mkdir(dir, { recursive: true, mode: 0o700 });

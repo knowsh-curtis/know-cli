@@ -20,3 +20,7 @@ export function codeChallenge(verifier: string): string {
 export function randomState(): string {
   return base64url(crypto.randomBytes(24));
 }
+
+export function randomNonce(): string {
+  return base64url(crypto.randomBytes(24));
+}
