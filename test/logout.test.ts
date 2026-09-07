@@ -66,6 +66,24 @@ describe('revocation', () => {
     await assert.rejects(refreshTokens(host.config(), 'refresh-8'), InvalidGrantError);
   });
 
+  it('never posts a handle minted by another issuer to the configured host', async () => {
+    host.handles.add('auth0-handle');
+    await saveTokens({
+      access_token: 'access-6',
+      refresh_token: 'auth0-handle',
+      expires_at: Math.floor(Date.now() / 1000) + 900,
+      token_type: 'Bearer',
+      iss: 'https://dev-hcpmhp1w4f2455pb.us.auth0.com/',
+    });
+    const before = host.requests.filter((r) => r.path === '/connect/revocation').length;
+
+    assert.equal(await logoutCommand(), 0);
+
+    assert.equal(host.requests.filter((r) => r.path === '/connect/revocation').length, before);
+    assert.equal(host.handles.has('auth0-handle'), true);
+    assert.equal(await loadTokens(), null);
+  });
+
   it('still clears the token file when revocation fails', async () => {
     process.env.KNOWSH_ISSUER = 'http://127.0.0.1:1';
     try {

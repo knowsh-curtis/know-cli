@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict';
-import { describe, it } from 'node:test';
+import { mkdtemp, rm } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import { after, before, describe, it } from 'node:test';
 import { ensureFreshTokens, type LiveState } from '../src/commands/mcp-proxy.js';
 import { issuerFor, resolveConfig, type CliConfig } from '../src/config.js';
 import { InvalidGrantError } from '../src/oauth.js';
@@ -7,18 +10,43 @@ import type { TokenSet } from '../src/tokens.js';
 
 const config: CliConfig = resolveConfig({});
 
+const nowSec = (): number => Math.floor(Date.now() / 1000);
+
 function tokenSet(overrides: Partial<TokenSet> = {}): TokenSet {
   return {
     access_token: 'stored-access',
     refresh_token: 'stored-refresh',
-    expires_at: Math.floor(Date.now() / 1000) + 900,
+    expires_at: nowSec() + 900,
     token_type: 'Bearer',
     iss: issuerFor(config),
     ...overrides,
   };
 }
 
+/** Near enough to expiry that the proxy must renew before using it. */
+function stale(overrides: Partial<TokenSet> = {}): TokenSet {
+  return tokenSet({ expires_at: nowSec() + 10, ...overrides });
+}
+
+const passthroughLock = <T>(run: () => Promise<T>): Promise<T> => run();
+
 describe('mcp-proxy token acquisition', () => {
+  // The lock file and the re-read both live beside tokens.json, so keep the
+  // suite off the developer's real ~/.config/know.sh.
+  let configHome: string;
+  const previousConfigHome = process.env.XDG_CONFIG_HOME;
+
+  before(async () => {
+    configHome = await mkdtemp(path.join(os.tmpdir(), 'know-cli-session-'));
+    process.env.XDG_CONFIG_HOME = configHome;
+  });
+
+  after(async () => {
+    if (previousConfigHome === undefined) delete process.env.XDG_CONFIG_HOME;
+    else process.env.XDG_CONFIG_HOME = previousConfigHome;
+    await rm(configHome, { recursive: true, force: true });
+  });
+
   it('uses the stored access token while it is fresh', async () => {
     const state: LiveState = { tokens: tokenSet() };
     const token = await ensureFreshTokens(state, {
@@ -29,7 +57,7 @@ describe('mcp-proxy token acquisition', () => {
   });
 
   it('refreshes and persists when the access token is near expiry', async () => {
-    const state: LiveState = { tokens: tokenSet({ expires_at: Math.floor(Date.now() / 1000) + 10 }) };
+    const state: LiveState = { tokens: stale() };
     const saved: TokenSet[] = [];
     const token = await ensureFreshTokens(state, {
       config,
@@ -45,11 +73,13 @@ describe('mcp-proxy token acquisition', () => {
   });
 
   it('clears the stored token set and signs in again on invalid_grant', async () => {
-    const state: LiveState = { tokens: tokenSet({ expires_at: Math.floor(Date.now() / 1000) + 10 }) };
+    const state: LiveState = { tokens: stale() };
     const events: string[] = [];
 
     const token = await ensureFreshTokens(state, {
       config,
+      lock: passthroughLock,
+      load: async () => null,
       refresh: async () => {
         events.push('refresh');
         throw new InvalidGrantError('refresh failed: invalid_grant');
@@ -72,10 +102,12 @@ describe('mcp-proxy token acquisition', () => {
   });
 
   it('does not swallow a failure that is not invalid_grant', async () => {
-    const state: LiveState = { tokens: tokenSet({ expires_at: Math.floor(Date.now() / 1000) + 10 }) };
+    const state: LiveState = { tokens: stale() };
     await assert.rejects(
       ensureFreshTokens(state, {
         config,
+        lock: passthroughLock,
+        load: async () => null,
         refresh: async () => {
           throw new Error('network down');
         },
@@ -85,28 +117,49 @@ describe('mcp-proxy token acquisition', () => {
     );
   });
 
-  it('treats a token set from another issuer as unusable', async () => {
-    const state: LiveState = { tokens: tokenSet({ iss: 'https://dev-tenant.us.auth0.com/' }) };
+  it('never presents a handle minted by another issuer', async () => {
+    const state: LiveState = {
+      tokens: tokenSet({ iss: 'https://dev-tenant.us.auth0.com/', refresh_token: 'auth0-handle' }),
+    };
+    const events: string[] = [];
+
     const token = await ensureFreshTokens(state, {
       config,
-      refresh: async () => tokenSet({ access_token: 'host-issued' }),
-      save: async () => {},
+      lock: () => assert.fail('a foreign handle is never rotated, so nothing needs the lock'),
+      load: async () => assert.fail('a foreign handle is never rotated'),
+      refresh: async (_config, handle) => assert.fail(`presented ${handle} to the wrong issuer`),
+      clear: async () => {
+        events.push('clear');
+      },
+      signIn: async () => {
+        events.push('login');
+        return tokenSet({ access_token: 'host-issued', refresh_token: 'host-handle' });
+      },
+      save: async () => {
+        events.push('save');
+      },
     });
+
     assert.equal(token, 'host-issued');
+    assert.deepEqual(events, ['clear', 'login', 'save']);
+    assert.equal(state.tokens.refresh_token, 'host-handle');
   });
 
   it('refuses to guess when there is no refresh handle', async () => {
-    const state: LiveState = {
-      tokens: tokenSet({ refresh_token: undefined, expires_at: Math.floor(Date.now() / 1000) + 10 }),
-    };
-    await assert.rejects(ensureFreshTokens(state, { config }), /run `know login`/);
+    const state: LiveState = { tokens: stale({ refresh_token: undefined }) };
+    await assert.rejects(
+      ensureFreshTokens(state, { config, lock: passthroughLock, load: async () => null }),
+      /run `know login`/,
+    );
   });
 
   it('refreshes once for concurrent callers, because rotation is one-time-use', async () => {
-    const state: LiveState = { tokens: tokenSet({ expires_at: Math.floor(Date.now() / 1000) + 10 }) };
+    const state: LiveState = { tokens: stale() };
     let refreshes = 0;
     const deps = {
       config,
+      lock: passthroughLock,
+      load: async () => null,
       refresh: async () => {
         refreshes += 1;
         await new Promise((resolve) => setTimeout(resolve, 10));
@@ -123,5 +176,106 @@ describe('mcp-proxy token acquisition', () => {
 
     assert.deepEqual(tokens, ['renewed', 'renewed', 'renewed']);
     assert.equal(refreshes, 1);
+  });
+});
+
+describe('mcp-proxy against a token file another process is using', () => {
+  it('takes the token set a sibling already rotated instead of refreshing again', async () => {
+    const state: LiveState = { tokens: stale({ refresh_token: 'spent' }) };
+    const token = await ensureFreshTokens(state, {
+      config,
+      lock: passthroughLock,
+      load: async () => tokenSet({ access_token: 'sibling-access', refresh_token: 'rotated' }),
+      refresh: async () => assert.fail('the file already held a fresh token'),
+    });
+
+    assert.equal(token, 'sibling-access');
+    assert.equal(state.tokens.refresh_token, 'rotated');
+  });
+
+  it('presents the rotated handle from the file, never the spent copy it held', async () => {
+    const state: LiveState = { tokens: stale({ refresh_token: 'spent' }) };
+    const presented: string[] = [];
+
+    const token = await ensureFreshTokens(state, {
+      config,
+      lock: passthroughLock,
+      load: async () => stale({ refresh_token: 'rotated' }),
+      refresh: async (_config, handle) => {
+        presented.push(handle);
+        return tokenSet({ access_token: 'renewed', refresh_token: 'rotated-again' });
+      },
+      save: async () => {},
+    });
+
+    assert.deepEqual(presented, ['rotated']);
+    assert.equal(token, 'renewed');
+  });
+
+  it('adopts a handle rotated under it rather than deleting the sibling token file', async () => {
+    const state: LiveState = { tokens: stale({ refresh_token: 'spent' }) };
+    const reads: (TokenSet | null)[] = [
+      stale({ refresh_token: 'spent' }),
+      stale({ refresh_token: 'rotated' }),
+    ];
+    const presented: string[] = [];
+
+    const token = await ensureFreshTokens(state, {
+      config,
+      lock: passthroughLock,
+      load: async () => reads.shift() ?? null,
+      refresh: async (_config, handle) => {
+        presented.push(handle);
+        if (handle === 'spent') throw new InvalidGrantError('refresh failed: invalid_grant');
+        return tokenSet({ access_token: 'renewed', refresh_token: 'rotated-again' });
+      },
+      clear: async () => assert.fail('a handle another process just rotated must survive'),
+      signIn: async () => assert.fail('the adopted handle worked'),
+      save: async () => {},
+    });
+
+    assert.deepEqual(presented, ['spent', 'rotated']);
+    assert.equal(token, 'renewed');
+    assert.equal(state.tokens.refresh_token, 'rotated-again');
+  });
+
+  it('clears the file when it still holds the handle that was refused', async () => {
+    const state: LiveState = { tokens: stale({ refresh_token: 'dead' }) };
+    const events: string[] = [];
+
+    const token = await ensureFreshTokens(state, {
+      config,
+      lock: passthroughLock,
+      load: async () => stale({ refresh_token: 'dead' }),
+      refresh: async () => {
+        throw new InvalidGrantError('refresh failed: invalid_grant');
+      },
+      clear: async () => {
+        events.push('clear');
+      },
+      signIn: async () => tokenSet({ access_token: 'after-login', refresh_token: 'fresh-handle' }),
+      save: async () => {},
+    });
+
+    assert.equal(token, 'after-login');
+    assert.deepEqual(events, ['clear']);
+  });
+
+  it('ignores a token file that belongs to another issuer', async () => {
+    const state: LiveState = { tokens: stale({ refresh_token: 'ours' }) };
+    const presented: string[] = [];
+
+    await ensureFreshTokens(state, {
+      config,
+      lock: passthroughLock,
+      load: async () => tokenSet({ iss: 'https://dev-tenant.us.auth0.com/', refresh_token: 'theirs' }),
+      refresh: async (_config, handle) => {
+        presented.push(handle);
+        return tokenSet({ access_token: 'renewed', refresh_token: 'rotated' });
+      },
+      save: async () => {},
+    });
+
+    assert.deepEqual(presented, ['ours']);
   });
 });

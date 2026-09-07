@@ -13,6 +13,8 @@ export interface FakeIdentityHost {
   /** Refresh handles the host still honours. */
   handles: Set<string>;
   authorizationCodes: Map<string, string>;
+  /** True once a handle from this family was replayed or revoked. */
+  familyRevoked(handle: string): boolean;
   config(overrides?: Partial<LoopbackConfig>): LoopbackConfig;
   tokenRequests(grantType: string): RecordedRequest[];
   close(): Promise<void>;
@@ -41,6 +43,25 @@ export async function startFakeIdentityHost(): Promise<FakeIdentityHost> {
   authorizationCodes.set('code-1', 'refresh-1');
   let minted = 0;
 
+  // ReplaySafeRefreshTokenService: one-time use, and replaying a spent handle
+  // revokes every handle in its family (DESIGN §6.3).
+  const familyOf = new Map<string, string>();
+  const revokedFamilies = new Set<string>();
+
+  const familyFor = (handle: string): string => {
+    const known = familyOf.get(handle);
+    if (known) return known;
+    familyOf.set(handle, handle);
+    return handle;
+  };
+
+  const revokeFamily = (family: string): void => {
+    revokedFamilies.add(family);
+    for (const handle of [...handles]) {
+      if (familyOf.get(handle) === family) handles.delete(handle);
+    }
+  };
+
   const server = http.createServer((req, res) => {
     void (async () => {
       const path = new URL(req.url ?? '/', 'http://127.0.0.1').pathname;
@@ -68,11 +89,20 @@ export async function startFakeIdentityHost(): Promise<FakeIdentityHost> {
         if (grantType === 'refresh_token') {
           const presented = form.get('refresh_token') ?? '';
           if (!handles.has(presented)) {
-            json(res, 400, { error: 'invalid_grant', error_description: 'refresh token is not active' });
+            const replayed = familyOf.get(presented);
+            if (replayed !== undefined) revokeFamily(replayed);
+            json(res, 400, {
+              error: 'invalid_grant',
+              error_description: replayed !== undefined
+                ? 'refresh token was already used; the family is revoked'
+                : 'refresh token is not active',
+            });
             return;
           }
+          const family = familyFor(presented);
           handles.delete(presented);
           const rotated = `${presented}-r${(minted += 1)}`;
+          familyOf.set(rotated, family);
           handles.add(rotated);
           json(res, 200, {
             access_token: `access-${minted}`,
@@ -88,7 +118,10 @@ export async function startFakeIdentityHost(): Promise<FakeIdentityHost> {
       }
 
       if (path === '/connect/revocation') {
-        handles.delete(form.get('token') ?? '');
+        const token = form.get('token') ?? '';
+        handles.delete(token);
+        const family = familyOf.get(token);
+        if (family !== undefined) revokeFamily(family);
         res.writeHead(200, { 'content-length': 0 });
         res.end();
         return;
@@ -113,6 +146,10 @@ export async function startFakeIdentityHost(): Promise<FakeIdentityHost> {
     requests,
     handles,
     authorizationCodes,
+    familyRevoked: (handle: string) => {
+      const family = familyOf.get(handle);
+      return family !== undefined && revokedFamilies.has(family);
+    },
     config: (overrides = {}) => ({
       mode: 'loopback',
       issuer,
