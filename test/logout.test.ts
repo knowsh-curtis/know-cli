@@ -3,11 +3,13 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { after, before, describe, it } from 'node:test';
+import { loginCommand } from '../src/commands/login.js';
 import { logoutCommand } from '../src/commands/logout.js';
 import { ensureFreshTokens, type LiveState } from '../src/commands/mcp-proxy.js';
+import { withFileLock } from '../src/lock.js';
 import { InvalidGrantError, refreshTokens } from '../src/oauth.js';
 import { revokeToken } from '../src/revoke.js';
-import { loadTokens, saveTokens, type TokenSet } from '../src/tokens.js';
+import { loadTokens, saveTokens, tokensLockPath, type TokenSet } from '../src/tokens.js';
 import {
   startBlackHoleHost,
   startFakeIdentityHost,
@@ -144,5 +146,137 @@ describe('revocation', () => {
     } finally {
       process.env.KNOWSH_ISSUER = host.issuer;
     }
+  });
+
+  it('logout racing an in-flight refresh revokes the rotated handle and clears the file', async () => {
+    host.handles.add('in-flight-handle');
+    await saveTokens({
+      access_token: 'access-old',
+      refresh_token: 'in-flight-handle',
+      expires_at: Math.floor(Date.now() / 1000) + 10,
+      token_type: 'Bearer',
+      iss: host.issuer,
+    });
+
+    let refreshUnderway = false;
+    let finishRefresh!: () => void;
+    const refreshGate = new Promise<void>((resolve) => {
+      finishRefresh = resolve;
+    });
+
+    const proxyPromise = withFileLock(tokensLockPath(), async () => {
+      refreshUnderway = true;
+      await refreshGate;
+      host.handles.delete('in-flight-handle');
+      host.handles.add('rotated-handle');
+      await saveTokens({
+        access_token: 'access-new',
+        refresh_token: 'rotated-handle',
+        expires_at: Math.floor(Date.now() / 1000) + 900,
+        token_type: 'Bearer',
+        iss: host.issuer,
+      });
+    });
+
+    while (!refreshUnderway) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+
+    const logoutPromise = logoutCommand();
+
+    assert.ok((await loadTokens()) !== null, 'token file survives while proxy holds the lock');
+
+    finishRefresh();
+    await proxyPromise;
+    await logoutPromise;
+
+    assert.equal(await loadTokens(), null);
+    assert.equal(host.handles.has('rotated-handle'), false);
+    const revocations = host.requests.filter((r) => r.path === '/connect/revocation');
+    assert.ok(revocations.some((r) => r.form.get('token') === 'rotated-handle'));
+  });
+
+  it('serialises logout against tokens.json.lock', async () => {
+    await saveTokens({
+      access_token: 'access-lock',
+      refresh_token: 'refresh-lock',
+      expires_at: Math.floor(Date.now() / 1000) + 900,
+      token_type: 'Bearer',
+      iss: host.issuer,
+    });
+
+    let lockUnderway = false;
+    let finishLock!: () => void;
+    const lockGate = new Promise<void>((resolve) => {
+      finishLock = resolve;
+    });
+
+    const lockPromise = withFileLock(tokensLockPath(), async () => {
+      lockUnderway = true;
+      await lockGate;
+    });
+
+    while (!lockUnderway) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+
+    let logoutFinished = false;
+    const logoutPromise = logoutCommand().then(() => {
+      logoutFinished = true;
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(logoutFinished, false);
+
+    finishLock();
+    await lockPromise;
+    await logoutPromise;
+
+    assert.equal(logoutFinished, true);
+    assert.equal(await loadTokens(), null);
+  });
+
+  it('serialises login against tokens.json.lock', async () => {
+    const fresh: TokenSet = {
+      access_token: 'login-access',
+      refresh_token: 'login-refresh',
+      expires_at: Math.floor(Date.now() / 1000) + 900,
+      token_type: 'Bearer',
+      iss: host.issuer,
+    };
+
+    let lockUnderway = false;
+    let finishLock!: () => void;
+    const lockGate = new Promise<void>((resolve) => {
+      finishLock = resolve;
+    });
+
+    const lockPromise = withFileLock(tokensLockPath(), async () => {
+      lockUnderway = true;
+      await lockGate;
+    });
+
+    while (!lockUnderway) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+
+    let loginSaved = false;
+    const loginPromise = loginCommand({
+      config: host.config(),
+      signIn: async () => fresh,
+    }).then(() => {
+      loginSaved = true;
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(loginSaved, false);
+
+    finishLock();
+    await lockPromise;
+    await loginPromise;
+
+    assert.equal(loginSaved, true);
+    const saved = await loadTokens();
+    assert.equal(saved?.access_token, 'login-access');
   });
 });

@@ -90,7 +90,9 @@ describe('token file lock', () => {
 
     // Four staleness windows: a token request has no upper bound of its own, so
     // a holder that cannot keep its lock alive is evicted while still inside it.
-    await Promise.all([hold(600), hold(10)]);
+    const longHolder = hold(600);
+    while (holders === 0) await new Promise((resolve) => setTimeout(resolve, 5));
+    await Promise.all([longHolder, hold(10)]);
 
     assert.equal(overlapped, false);
     await assert.rejects(stat(lockPath), /ENOENT/);

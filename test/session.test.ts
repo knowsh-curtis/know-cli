@@ -126,8 +126,8 @@ describe('mcp-proxy token acquisition', () => {
 
     const token = await ensureFreshTokens(state, {
       config,
-      lock: () => assert.fail('a foreign handle is never rotated, so nothing needs the lock'),
-      load: async () => assert.fail('a foreign handle is never rotated'),
+      lock: passthroughLock,
+      load: async () => state.tokens,
       refresh: async (_config, handle) => assert.fail(`presented ${handle} to the wrong issuer`),
       clear: async () => {
         events.push('clear');
@@ -144,6 +144,42 @@ describe('mcp-proxy token acquisition', () => {
     assert.equal(token, 'host-issued');
     assert.deepEqual(events, ['clear', 'login', 'save']);
     assert.equal(state.tokens.refresh_token, 'host-handle');
+  });
+
+  it('adopts a fresh token file when the in-memory set is foreign, without clearing or signing in again', async () => {
+    const state: LiveState = {
+      tokens: tokenSet({ iss: 'https://dev-tenant.us.auth0.com/', refresh_token: 'auth0-handle' }),
+    };
+
+    const token = await ensureFreshTokens(state, {
+      config,
+      lock: passthroughLock,
+      load: async () => tokenSet({ access_token: 'valid-host-token' }),
+      refresh: async () => assert.fail('fresh tokens must not be refreshed'),
+      clear: async () => assert.fail('valid token file must not be cleared'),
+      signIn: async () => assert.fail('must not open browser when valid token file exists on disk'),
+    });
+
+    assert.equal(token, 'valid-host-token');
+    assert.equal(state.tokens.access_token, 'valid-host-token');
+    assert.equal(state.tokens.iss, issuerFor(config));
+  });
+
+  it('refuses to open a browser when the in-memory set is foreign but the token file was cleared', async () => {
+    const state: LiveState = {
+      tokens: tokenSet({ iss: 'https://dev-tenant.us.auth0.com/', refresh_token: 'auth0-handle' }),
+    };
+
+    await assert.rejects(
+      ensureFreshTokens(state, {
+        config,
+        lock: passthroughLock,
+        load: async () => null,
+        refresh: async () => assert.fail('should not refresh'),
+        signIn: async () => assert.fail('must not open browser when token file was cleared'),
+      }),
+      /the stored token set was cleared — run `know login`/,
+    );
   });
 
   it('refuses to guess when there is no refresh handle', async () => {
@@ -302,8 +338,8 @@ describe('mcp-proxy against a token file another process is using', () => {
 
     const token = await ensureFreshTokens(state, {
       config,
-      lock: () => assert.fail('a set of unknown provenance is never rotated'),
-      load: async () => assert.fail('a set of unknown provenance is never rotated'),
+      lock: passthroughLock,
+      load: async () => state.tokens,
       refresh: async (_config, handle) => assert.fail(`presented ${handle} to an unproven host`),
       clear: async () => {
         events.push('clear');

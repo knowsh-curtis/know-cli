@@ -49,7 +49,7 @@ function isFresh(tokens: TokenSet): boolean {
 async function signInAgain(state: LiveState, config: CliConfig, deps: SessionDeps): Promise<string> {
   const fresh = await (deps.signIn ?? login)(config);
   state.tokens = fresh;
-  await (deps.save ?? saveTokens)(fresh);
+  await (deps.lock ?? lockTokenFile)(() => (deps.save ?? saveTokens)(fresh));
   return fresh.access_token;
 }
 
@@ -83,6 +83,9 @@ async function refreshUnderLock(
   if (mintedByConfiguredIssuer(onDisk, config)) {
     state.tokens = onDisk;
     if (isFresh(onDisk)) return onDisk.access_token;
+  } else if (!mintedByConfiguredIssuer(state.tokens, config)) {
+    await (deps.clear ?? clearTokens)();
+    return null;
   }
 
   const handle = state.tokens.refresh_token;
@@ -107,6 +110,7 @@ async function refreshUnderLock(
     mintedByConfiguredIssuer(rotated, config)
   ) {
     state.tokens = rotated;
+    if (isFresh(rotated)) return rotated.access_token;
     try {
       return await persist(await refresh(config, rotated.refresh_token));
     } catch (err) {
@@ -120,14 +124,6 @@ async function refreshUnderLock(
 
 async function acquireTokens(state: LiveState, deps: SessionDeps): Promise<string> {
   const config = deps.config ?? resolveConfig();
-
-  // A handle from another issuer is that issuer's credential. It cannot be
-  // renewed here and must never be presented to a host that did not mint it.
-  if (!mintedByConfiguredIssuer(state.tokens, config)) {
-    await (deps.clear ?? clearTokens)();
-    return signInAgain(state, config, deps);
-  }
-
   const renewed = await (deps.lock ?? lockTokenFile)(() => refreshUnderLock(state, config, deps));
   return renewed ?? signInAgain(state, config, deps);
 }
