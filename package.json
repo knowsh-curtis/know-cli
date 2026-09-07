@@ -20,6 +20,7 @@
   "scripts": {
     "build": "tsc -b",
     "typecheck": "tsc -b --dry",
+    "test": "tsc -p test/tsconfig.json && node --import tsx --test test/*.test.ts",
     "start": "node dist/index.js",
     "dev": "tsx src/index.ts"
   },
