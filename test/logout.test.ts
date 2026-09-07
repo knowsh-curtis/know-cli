@@ -4,10 +4,16 @@ import os from 'node:os';
 import path from 'node:path';
 import { after, before, describe, it } from 'node:test';
 import { logoutCommand } from '../src/commands/logout.js';
+import { ensureFreshTokens, type LiveState } from '../src/commands/mcp-proxy.js';
 import { InvalidGrantError, refreshTokens } from '../src/oauth.js';
 import { revokeToken } from '../src/revoke.js';
-import { loadTokens, saveTokens } from '../src/tokens.js';
-import { startFakeIdentityHost, type FakeIdentityHost } from './fake-identity-host.js';
+import { loadTokens, saveTokens, type TokenSet } from '../src/tokens.js';
+import {
+  startBlackHoleHost,
+  startFakeIdentityHost,
+  type BlackHoleHost,
+  type FakeIdentityHost,
+} from './fake-identity-host.js';
 
 describe('revocation', () => {
   let host: FakeIdentityHost;
@@ -84,6 +90,45 @@ describe('revocation', () => {
     assert.equal(await loadTokens(), null);
   });
 
+  it('leaves a proxy that is still running signed out, without opening a browser', async () => {
+    host.handles.add('refresh-live');
+    const stored: TokenSet = {
+      access_token: 'access-live',
+      refresh_token: 'refresh-live',
+      expires_at: Math.floor(Date.now() / 1000) + 10,
+      token_type: 'Bearer',
+      iss: host.issuer,
+    };
+    await saveTokens(stored);
+    const proxy: LiveState = { tokens: stored };
+
+    assert.equal(await logoutCommand(), 0);
+    const refreshesBefore = host.tokenRequests('refresh_token').length;
+
+    await assert.rejects(
+      ensureFreshTokens(proxy, {
+        config: host.config(),
+        signIn: async () => assert.fail('logging out must not open a browser in a running proxy'),
+      }),
+      /run `know login`/,
+    );
+
+    assert.equal(host.tokenRequests('refresh_token').length, refreshesBefore);
+    assert.equal(await loadTokens(), null);
+  });
+
+  it('gives up on a revocation the host never answers', async () => {
+    const blackHole: BlackHoleHost = await startBlackHoleHost();
+    try {
+      await assert.rejects(
+        revokeToken(host.config({ issuer: blackHole.issuer, requestTimeoutMs: 150 }), 'refresh-5'),
+        /revocation timed out after 150 ms/,
+      );
+    } finally {
+      await blackHole.close();
+    }
+  });
+
   it('still clears the token file when revocation fails', async () => {
     process.env.KNOWSH_ISSUER = 'http://127.0.0.1:1';
     try {
@@ -92,6 +137,7 @@ describe('revocation', () => {
         refresh_token: 'refresh-7',
         expires_at: Math.floor(Date.now() / 1000) + 900,
         token_type: 'Bearer',
+        iss: 'http://127.0.0.1:1',
       });
       assert.equal(await logoutCommand(), 0);
       assert.equal(await loadTokens(), null);

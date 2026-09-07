@@ -61,6 +61,7 @@ describe('mcp-proxy token acquisition', () => {
     const saved: TokenSet[] = [];
     const token = await ensureFreshTokens(state, {
       config,
+      load: async () => stale(),
       refresh: async () => tokenSet({ access_token: 'renewed', refresh_token: 'rotated' }),
       save: async (tokens) => {
         saved.push(tokens);
@@ -79,7 +80,7 @@ describe('mcp-proxy token acquisition', () => {
     const token = await ensureFreshTokens(state, {
       config,
       lock: passthroughLock,
-      load: async () => null,
+      load: async () => stale(),
       refresh: async () => {
         events.push('refresh');
         throw new InvalidGrantError('refresh failed: invalid_grant');
@@ -107,7 +108,7 @@ describe('mcp-proxy token acquisition', () => {
       ensureFreshTokens(state, {
         config,
         lock: passthroughLock,
-        load: async () => null,
+        load: async () => stale(),
         refresh: async () => {
           throw new Error('network down');
         },
@@ -148,8 +149,12 @@ describe('mcp-proxy token acquisition', () => {
   it('refuses to guess when there is no refresh handle', async () => {
     const state: LiveState = { tokens: stale({ refresh_token: undefined }) };
     await assert.rejects(
-      ensureFreshTokens(state, { config, lock: passthroughLock, load: async () => null }),
-      /run `know login`/,
+      ensureFreshTokens(state, {
+        config,
+        lock: passthroughLock,
+        load: async () => stale({ refresh_token: undefined }),
+      }),
+      /there is no refresh token/,
     );
   });
 
@@ -159,7 +164,7 @@ describe('mcp-proxy token acquisition', () => {
     const deps = {
       config,
       lock: passthroughLock,
-      load: async () => null,
+      load: async () => stale(),
       refresh: async () => {
         refreshes += 1;
         await new Promise((resolve) => setTimeout(resolve, 10));
@@ -259,6 +264,61 @@ describe('mcp-proxy against a token file another process is using', () => {
 
     assert.equal(token, 'after-login');
     assert.deepEqual(events, ['clear']);
+  });
+
+  it('refuses to start a browser when the token file was cleared under it', async () => {
+    const state: LiveState = { tokens: stale() };
+
+    await assert.rejects(
+      ensureFreshTokens(state, {
+        config,
+        lock: passthroughLock,
+        load: async () => null,
+        refresh: async () => assert.fail('a handle nobody is storing must not be spent'),
+        signIn: async () => assert.fail('`know logout` must not open a browser in every proxy'),
+      }),
+      /the stored token set was cleared — run `know login`/,
+    );
+  });
+
+  it('picks up the token set the next `know login` writes', async () => {
+    const state: LiveState = { tokens: stale() };
+    const files: (TokenSet | null)[] = [null, tokenSet({ access_token: 'after-login' })];
+    const deps = {
+      config,
+      lock: passthroughLock,
+      load: async () => files.shift() ?? null,
+      refresh: async () => assert.fail('the file already held a token that works'),
+      signIn: async () => assert.fail('the user is the one who signs in'),
+    };
+
+    await assert.rejects(ensureFreshTokens(state, deps), /run `know login`/);
+    assert.equal(await ensureFreshTokens(state, deps), 'after-login');
+  });
+
+  it('never presents a token set that names no issuer', async () => {
+    const state: LiveState = { tokens: tokenSet({ iss: undefined, refresh_token: 'unknown' }) };
+    const events: string[] = [];
+
+    const token = await ensureFreshTokens(state, {
+      config,
+      lock: () => assert.fail('a set of unknown provenance is never rotated'),
+      load: async () => assert.fail('a set of unknown provenance is never rotated'),
+      refresh: async (_config, handle) => assert.fail(`presented ${handle} to an unproven host`),
+      clear: async () => {
+        events.push('clear');
+      },
+      signIn: async () => {
+        events.push('login');
+        return tokenSet({ access_token: 'host-issued', refresh_token: 'host-handle' });
+      },
+      save: async () => {
+        events.push('save');
+      },
+    });
+
+    assert.equal(token, 'host-issued');
+    assert.deepEqual(events, ['clear', 'login', 'save']);
   });
 
   it('ignores a token file that belongs to another issuer', async () => {

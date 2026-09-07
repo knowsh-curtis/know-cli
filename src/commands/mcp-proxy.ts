@@ -37,8 +37,9 @@ export interface SessionDeps {
 
 const lockTokenFile = <T>(run: () => Promise<T>): Promise<T> => withFileLock(tokensLockPath(), run);
 
+/** A set that names no issuer has unknown provenance, so it is nobody's to present either. */
 function mintedByConfiguredIssuer(tokens: TokenSet, config: CliConfig): boolean {
-  return tokens.iss === undefined || tokens.iss === issuerFor(config);
+  return tokens.iss === issuerFor(config);
 }
 
 function isFresh(tokens: TokenSet): boolean {
@@ -51,6 +52,9 @@ async function signInAgain(state: LiveState, config: CliConfig, deps: SessionDep
   await (deps.save ?? saveTokens)(fresh);
   return fresh.access_token;
 }
+
+/** `know logout` and a sibling proxy both sign out by deleting the token file. */
+const SIGNED_OUT = 'the stored token set was cleared — run `know login`';
 
 /**
  * Renew the handle while holding the token-file lock. Returns null when only an
@@ -70,9 +74,13 @@ async function refreshUnderLock(
     return renewed.access_token;
   };
 
-  // Another proxy may have rotated the handle since this process read the file.
+  // The file, not this process's memory, says whether anyone is signed in: a
+  // logout deletes it, and so does a sibling the host refused. Renewing what is
+  // left in memory would undo a sign-out the user asked for, and starting a
+  // browser would ask every running proxy to sign in again for them.
   const onDisk = await load();
-  if (onDisk && mintedByConfiguredIssuer(onDisk, config)) {
+  if (!onDisk) throw new Error(SIGNED_OUT);
+  if (mintedByConfiguredIssuer(onDisk, config)) {
     state.tokens = onDisk;
     if (isFresh(onDisk)) return onDisk.access_token;
   }
@@ -92,8 +100,9 @@ async function refreshUnderLock(
   // rotated it while this process held the old copy: adopt that handle rather
   // than deleting a credential which still works.
   const rotated = await load();
+  if (!rotated) throw new Error(SIGNED_OUT);
   if (
-    rotated?.refresh_token &&
+    rotated.refresh_token &&
     rotated.refresh_token !== handle &&
     mintedByConfiguredIssuer(rotated, config)
   ) {

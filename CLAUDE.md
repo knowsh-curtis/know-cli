@@ -22,11 +22,18 @@ audience. Refreshes name the same resource and no scope; the handle is
 one-time-use and a replay revokes the whole family, so token acquisition is
 single-flight both inside a process and between processes — every MCP client
 spawns its own `mcp-proxy` over one `tokens.json`, so the file lock in
-`src/lock.ts` is the half that matters.
+`src/lock.ts` is the half that matters. That lock heartbeats while it is held
+and every identity-host request carries a deadline (`src/http.ts`), because a
+holder that outlives its own staleness window is evicted and replays the handle
+it is in the middle of spending.
 
 A stored handle belongs to the issuer that minted it. When `tokens.iss` is not
-the configured issuer the set is cleared and a sign-in starts; it is never
-presented for refresh or revocation.
+the configured issuer — including when the set names no issuer — it is cleared
+and a sign-in starts; it is never presented for refresh or revocation.
+
+The token file is what says a user is signed in. `know logout` and a sibling
+proxy whose handle was refused both sign out by deleting it, so a proxy that
+finds it gone reports that and stops instead of opening a browser.
 
 The Auth0 device-code flow survives behind `KNOWSH_LEGACY_DEVICE_FLOW`
 until that tenant retires — the identity host serves no device

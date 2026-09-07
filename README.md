@@ -31,7 +31,9 @@ MCP tools: `research.list`, `research.get`, `research.create`,
   stdin, posts them to the MCP server with the current access token, streams
   responses back. Refreshes the token transparently when it's near expiry.
 - `logout`: revokes the refresh token at the host's `/connect/revocation`,
-  which drops the whole token family, then deletes the token file.
+  which drops the whole token family, then deletes the token file. Proxies that
+  are still running report that they are signed out on their next call; they do
+  not open a browser to sign you back in.
 
 ## Token audience
 
@@ -51,13 +53,21 @@ plus the eight MCP scopes; the host issues no `email` claim and grants no
   `mcp-proxy` over the same token file, so renewal is serialised by a lock file
   (`tokens.json.lock`) and the file is re-read inside the lock: a proxy that
   loses the race picks up the rotated handle instead of replaying a spent one.
+  The lock is kept alive while it is held, and every request to the identity
+  host has a deadline, so a slow host cannot make a live holder look abandoned
+  and get its handle spent twice.
 - A refused refresh (`invalid_grant`) clears the stored token set and starts a
   fresh sign-in rather than looping on a dead handle — unless the token file
   has meanwhile moved on to a different handle, which means another proxy
   rotated it, and that one is adopted instead.
+- The token file, not a running proxy's memory, decides whether anyone is
+  signed in. A file that has been deleted ends the session: the proxy reports
+  it and stops rather than renewing a handle the user revoked or opening a
+  browser nobody asked for.
 - Tokens minted by a different issuer (an Auth0 set left over from the device
   flow, say) are never presented to the configured host, neither for refresh
-  nor for revocation. They are cleared locally and a fresh sign-in starts.
+  nor for revocation, and neither is a set that names no issuer at all. They
+  are cleared locally and a fresh sign-in starts.
 - The proxy never writes tokens to stdout or stderr, and sign-in prompts go to
   stderr so they cannot corrupt the JSON-RPC channel.
 - `~/.config/know.sh/tokens.json` is created with 0600 permissions.
@@ -71,6 +81,8 @@ Environment variables:
 - `KNOWSH_RESOURCE` — default `https://mcp.dev.know.sh/`.
 - `KNOWSH_SCOPES` — default `openid profile offline_access research:read research:write findings:read findings:write campaigns:read campaigns:write operations:read operations:write`.
 - `KNOWSH_MCP_URL` — default `https://mcp.dev.know.sh/mcp`.
+- `KNOWSH_HTTP_TIMEOUT_MS` — deadline for one request to the identity host,
+  default `15000`.
 
 Legacy: setting `KNOWSH_LEGACY_DEVICE_FLOW=1` runs the previous OAuth 2.0
 Device Authorization Flow against Auth0 instead, with
