@@ -14,7 +14,13 @@ TypeScript CLI client. Cross-workspace conventions in
 
 ## API consumption
 
-Auth + token handling mirrors what the SPA does. Tokens come from
-Auth0 (`@auth0/*` SDK or device-code flow). The CLI is one of the
-audiences `know-api` accepts via `Auth0:AdditionalAudiences` — coordinate
-with `know-api` config when adding new audiences.
+Tokens come from the know.sh identity host: authorization code with PKCE
+over a `127.0.0.1` loopback redirect, `know-cli-development`, and one RFC
+8707 `resource` (`https://mcp.dev.know.sh/`, trailing slash included) on
+every token request, which is what gives the access token its single
+audience. Refreshes name the same resource and no scope; the handle is
+one-time-use, so token acquisition is single-flight.
+
+The Auth0 device-code flow survives behind `KNOWSH_LEGACY_DEVICE_FLOW`
+until that tenant retires — the identity host serves no device
+authorization endpoint.

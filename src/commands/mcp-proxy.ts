@@ -6,30 +6,69 @@
  * the user's Bearer token, and stream responses back out on stdout.
  *
  * We also refresh the access token when it's near expiry so the user doesn't
- * see auth errors mid-session.
+ * see auth errors mid-session, and start a fresh sign-in when the host refuses
+ * the stored handle.
  */
-import { resolveConfig } from '../config.js';
-import { refreshTokens } from '../oauth.js';
-import { loadTokens, saveTokens, type TokenSet } from '../tokens.js';
+import { issuerFor, resolveConfig, type CliConfig } from '../config.js';
+import { InvalidGrantError, login, refreshTokens } from '../oauth.js';
+import { clearTokens, loadTokens, saveTokens, type TokenSet } from '../tokens.js';
 import { createInterface } from 'node:readline';
 
-interface LiveState {
+export interface LiveState {
   tokens: TokenSet;
+  /** Rotation is one-time-use, so two concurrent refreshes would revoke the family. */
+  acquiring?: Promise<string>;
 }
 
-async function ensureFreshTokens(state: LiveState): Promise<string> {
-  const now = Math.floor(Date.now() / 1000);
-  if (state.tokens.expires_at - now > 60) {
+export interface SessionDeps {
+  config?: CliConfig;
+  refresh?: typeof refreshTokens;
+  signIn?: typeof login;
+  save?: typeof saveTokens;
+  clear?: typeof clearTokens;
+}
+
+function isUsable(tokens: TokenSet, config: CliConfig): boolean {
+  if (tokens.iss !== undefined && tokens.iss !== issuerFor(config)) return false;
+  return tokens.expires_at - Math.floor(Date.now() / 1000) > 60;
+}
+
+async function acquireTokens(state: LiveState, deps: SessionDeps): Promise<string> {
+  const config = deps.config ?? resolveConfig();
+  const save = deps.save ?? saveTokens;
+  const handle = state.tokens.refresh_token;
+  if (!handle) {
+    throw new Error('stored access token is unusable and there is no refresh token — run `know login`');
+  }
+
+  try {
+    const renewed = await (deps.refresh ?? refreshTokens)(config, handle);
+    state.tokens = renewed;
+    await save(renewed);
+    return renewed.access_token;
+  } catch (err) {
+    if (!(err instanceof InvalidGrantError)) throw err;
+    await (deps.clear ?? clearTokens)();
+  }
+
+  const fresh = await (deps.signIn ?? login)(config);
+  state.tokens = fresh;
+  await save(fresh);
+  return fresh.access_token;
+}
+
+export async function ensureFreshTokens(
+  state: LiveState,
+  deps: SessionDeps = {},
+): Promise<string> {
+  const config = deps.config ?? resolveConfig();
+  if (isUsable(state.tokens, config)) {
     return state.tokens.access_token;
   }
-  if (!state.tokens.refresh_token) {
-    throw new Error('access token near expiry and no refresh token — run `know login`');
-  }
-  const config = resolveConfig();
-  const fresh = await refreshTokens(config, state.tokens.refresh_token);
-  state.tokens = fresh;
-  await saveTokens(fresh);
-  return fresh.access_token;
+  state.acquiring ??= acquireTokens(state, { ...deps, config }).finally(() => {
+    state.acquiring = undefined;
+  });
+  return state.acquiring;
 }
 
 /** Send one JSON-RPC frame to the MCP server; stream the response (or error) out. */
@@ -142,7 +181,7 @@ export async function mcpProxyCommand(): Promise<number> {
     const frame = line.trim();
     if (!frame) continue;
     try {
-      await forwardFrame(config.mcpUrl, () => ensureFreshTokens(state), frame, sessionHeader);
+      await forwardFrame(config.mcpUrl, () => ensureFreshTokens(state, { config }), frame, sessionHeader);
     } catch (err) {
       writeFrame(JSON.stringify({
         jsonrpc: '2.0',
