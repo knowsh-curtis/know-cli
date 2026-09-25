@@ -18,6 +18,34 @@ MCP tools: `research.list`, `research.get`, `research.create`,
 `research.update_overview`, `finding.add`, `finding.update`, `finding.delete`,
 `search`, …
 
+## Install as a Claude Code plugin
+
+This repository is also a Claude Code plugin marketplace. The plugin connects
+Claude Code straight to the know.sh MCP server over Streamable HTTP; Claude
+Code registers itself and signs you in with OAuth the first time you use it,
+so no token or credential is stored in the plugin.
+
+```sh
+claude plugin marketplace add knowsh-curtis/know-cli
+claude plugin install know-dev@know-sh
+```
+
+Start a new session and run `/mcp` to sign in. The plugin and its server are
+named `know-dev` because they address the know.sh dev environment
+(`https://mcp.dev.know.sh/mcp`).
+
+## Use in claude.ai / ChatGPT
+
+The same server works as a remote connector. Both clients sign in with OAuth;
+there is nothing to paste but the URL.
+
+- claude.ai: Settings → Connectors → Add custom connector, URL
+  `https://mcp.dev.know.sh/mcp`.
+- ChatGPT: Settings → Connectors → Advanced → Developer mode, then Create,
+  URL `https://mcp.dev.know.sh/mcp`, authentication OAuth.
+
+The server is named `know-dev` because it addresses the dev environment.
+
 ## What it does
 
 - `login`: opens your browser and runs OAuth 2.1 Authorization Code + PKCE
