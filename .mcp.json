@@ -2,7 +2,10 @@
   "mcpServers": {
     "know-dev": {
       "type": "http",
-      "url": "https://mcp.dev.know.sh/mcp"
+      "url": "https://mcp.dev.know.sh/mcp",
+      "oauth": {
+        "scopes": "openid profile email offline_access mcp:research:read mcp:research:write mcp:findings:read mcp:findings:write mcp:campaigns:read mcp:campaigns:write mcp:operations:read mcp:operations:write"
+      }
     }
   }
 }
