@@ -1,0 +1,16 @@
+{
+  "name": "know-sh",
+  "description": "Claude Code plugins published by know.sh.",
+  "owner": {
+    "name": "know.sh",
+    "email": "curtis.turner@know.sh",
+    "url": "https://know.sh"
+  },
+  "plugins": [
+    {
+      "name": "know-dev",
+      "source": "./",
+      "description": "Connects Claude Code to the know.sh dev MCP server (research docs, findings, campaigns) over OAuth."
+    }
+  ]
+}

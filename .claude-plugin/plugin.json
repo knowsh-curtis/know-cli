@@ -1,0 +1,15 @@
+{
+  "name": "know-dev",
+  "displayName": "know.sh (dev)",
+  "version": "0.1.0",
+  "description": "Connects Claude Code to the know.sh dev MCP server: research docs, findings, and campaigns in your know.sh notebook. Signs in with OAuth on first use.",
+  "author": {
+    "name": "know.sh",
+    "email": "curtis.turner@know.sh",
+    "url": "https://know.sh"
+  },
+  "homepage": "https://know.sh",
+  "repository": "https://github.com/knowsh-curtis/know-cli",
+  "license": "MIT",
+  "keywords": ["know.sh", "mcp", "research", "findings", "campaigns", "notebook"]
+}
