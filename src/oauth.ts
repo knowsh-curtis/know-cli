@@ -1,8 +1,8 @@
 /**
  * Authorization code with PKCE against the know.sh identity host, over a
- * loopback redirect (RFC 8252 §7.3). Every token request names the MCP
- * resource with RFC 8707 `resource`, which is what gives the access token its
- * single audience.
+ * loopback redirect (RFC 8252 §7.3), as the client `src/registration.ts`
+ * resolves. Every token request names the MCP resource with RFC 8707
+ * `resource`, which is what gives the access token its single audience.
  *
  * The device flow the CLI used against Auth0 is kept for the legacy
  * KNOWSH_LEGACY_DEVICE_FLOW path only: the identity host serves no device
@@ -20,6 +20,7 @@ import {
 import { isTimeout, postForm, timedOut } from './http.js';
 import { startLoopbackReceiver, type LoopbackReceiver } from './loopback.js';
 import { codeChallenge, generateCodeVerifier, randomNonce, randomState } from './pkce.js';
+import { clearRegistration, resolveClient } from './registration.js';
 import type { TokenSet } from './tokens.js';
 
 export class InvalidGrantError extends Error {
@@ -92,7 +93,12 @@ async function postTokenForm(
   return (await res.json()) as TokenResponse;
 }
 
-function toTokenSet(payload: TokenResponse, config: CliConfig, previousHandle?: string): TokenSet {
+function toTokenSet(
+  payload: TokenResponse,
+  config: CliConfig,
+  clientId: string,
+  previousHandle?: string,
+): TokenSet {
   return {
     access_token: payload.access_token,
     refresh_token: payload.refresh_token ?? previousHandle,
@@ -101,10 +107,12 @@ function toTokenSet(payload: TokenResponse, config: CliConfig, previousHandle?: 
     token_type: payload.token_type,
     scope: payload.scope,
     iss: issuerFor(config),
+    client_id: clientId,
   };
 }
 
 export interface AuthorizeRequest {
+  clientId: string;
   redirectUri: string;
   state: string;
   nonce: string;
@@ -115,7 +123,7 @@ export function buildAuthorizeUrl(config: LoopbackConfig, request: AuthorizeRequ
   const url = new URL(identityEndpoints(config.issuer).authorize);
   url.search = new URLSearchParams({
     response_type: 'code',
-    client_id: config.clientId,
+    client_id: request.clientId,
     redirect_uri: request.redirectUri,
     scope: config.scopes,
     state: request.state,
@@ -128,6 +136,7 @@ export function buildAuthorizeUrl(config: LoopbackConfig, request: AuthorizeRequ
 }
 
 export interface CodeExchange {
+  clientId: string;
   code: string;
   codeVerifier: string;
   redirectUri: string;
@@ -141,7 +150,7 @@ export async function exchangeCode(
     identityEndpoints(config.issuer).token,
     new URLSearchParams({
       grant_type: 'authorization_code',
-      client_id: config.clientId,
+      client_id: exchange.clientId,
       code: exchange.code,
       code_verifier: exchange.codeVerifier,
       redirect_uri: exchange.redirectUri,
@@ -150,7 +159,35 @@ export async function exchangeCode(
     'code exchange',
     config.requestTimeoutMs,
   );
-  return toTokenSet(payload, config);
+  return toTokenSet(payload, config, exchange.clientId);
+}
+
+/**
+ * The host answers an authorization request it will not serve (an unknown
+ * client, a scope or resource it does not allow) with its own error page, or
+ * with an error on the redirect, never with a code; the loopback receiver would
+ * wait out its whole timeout. One request that follows no redirect surfaces the
+ * refusal before a browser opens. Returns the reason, or null when the host
+ * would go on to sign the user in.
+ */
+async function authorizeRefusal(authorizeUrl: string, timeoutMs: number): Promise<string | null> {
+  let res: Response;
+  try {
+    res = await fetch(authorizeUrl, { redirect: 'manual', signal: AbortSignal.timeout(timeoutMs) });
+  } catch (err) {
+    if (!isTimeout(err)) throw err;
+    throw timedOut('authorization check', timeoutMs);
+  }
+  await res.body?.cancel();
+  const location = res.headers.get('location');
+  if (!location) return res.ok ? null : `the host answered ${res.status}`;
+  const target = new URL(location, authorizeUrl);
+  const error = target.searchParams.get('error');
+  if (error) {
+    const description = target.searchParams.get('error_description');
+    return `${error}${description ? ` — ${description}` : ''}`;
+  }
+  return target.pathname.toLowerCase().endsWith('/error') ? `see ${target}` : null;
 }
 
 export async function loginWithLoopback(
@@ -164,12 +201,23 @@ export async function loginWithLoopback(
   let receiver: LoopbackReceiver | undefined;
   try {
     receiver = await startLoopbackReceiver({ state, timeoutMs: options.timeoutMs });
-    const authorizeUrl = buildAuthorizeUrl(config, {
-      redirectUri: receiver.redirectUri,
-      state,
-      nonce: randomNonce(),
-      codeChallenge: codeChallenge(verifier),
-    });
+    const redirectUri = receiver.redirectUri;
+    const nonce = randomNonce();
+    const authorizeUrlFor = (clientId: string) =>
+      buildAuthorizeUrl(config, { clientId, redirectUri, state, nonce, codeChallenge: codeChallenge(verifier) });
+
+    let client = await resolveClient(config);
+    let authorizeUrl = authorizeUrlFor(client.clientId);
+    let refusal = await authorizeRefusal(authorizeUrl, config.requestTimeoutMs);
+    if (refusal && client.stored) {
+      // The host no longer knows the stored registration (revoked, or the
+      // tenant was reset): register again, once.
+      await clearRegistration();
+      client = await resolveClient(config);
+      authorizeUrl = authorizeUrlFor(client.clientId);
+      refusal = await authorizeRefusal(authorizeUrl, config.requestTimeoutMs);
+    }
+    if (refusal) throw new Error(`the identity host refused the sign-in request: ${refusal}`);
 
     log('');
     log('Opening your browser to sign in. If it does not open, visit:');
@@ -186,9 +234,10 @@ export async function loginWithLoopback(
 
     const code = await receiver.code;
     return await exchangeCode(config, {
+      clientId: client.clientId,
       code,
       codeVerifier: verifier,
-      redirectUri: receiver.redirectUri,
+      redirectUri,
     });
   } finally {
     await receiver?.close();
@@ -201,22 +250,31 @@ export async function login(config: CliConfig, options: LoginOptions = {}): Prom
     : loginWithDeviceFlow(config, options);
 }
 
-export async function refreshTokens(config: CliConfig, refreshToken: string): Promise<TokenSet> {
+/** `clientId` is the client the handle was issued to, as its token set records it. */
+export async function refreshTokens(
+  config: CliConfig,
+  refreshToken: string,
+  clientId?: string,
+): Promise<TokenSet> {
   if (config.mode === 'device') {
     return refreshDeviceTokens(config, refreshToken);
+  }
+  const client = clientId ?? config.clientId;
+  if (!client) {
+    throw new InvalidGrantError('refresh failed: the stored token set names no client');
   }
   const payload = await postTokenForm(
     identityEndpoints(config.issuer).token,
     new URLSearchParams({
       grant_type: 'refresh_token',
-      client_id: config.clientId,
+      client_id: client,
       refresh_token: refreshToken,
       resource: config.resource,
     }),
     'refresh',
     config.requestTimeoutMs,
   );
-  return toTokenSet(payload, config, refreshToken);
+  return toTokenSet(payload, config, client, refreshToken);
 }
 
 interface DeviceCodeResponse {
@@ -327,7 +385,7 @@ export async function loginWithDeviceFlow(
   }
 
   const tokens = await pollForTokens(config, device.device_code, device.interval, device.expires_in);
-  return toTokenSet(tokens, config);
+  return toTokenSet(tokens, config, config.auth0ClientId);
 }
 
 /** Back-compat alias so callers that say `loginWithPkce` keep working. */
@@ -345,5 +403,5 @@ async function refreshDeviceTokens(config: DeviceConfig, refreshToken: string): 
     'refresh',
     config.requestTimeoutMs,
   );
-  return toTokenSet(payload, config, refreshToken);
+  return toTokenSet(payload, config, config.auth0ClientId, refreshToken);
 }

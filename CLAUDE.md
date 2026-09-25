@@ -15,11 +15,20 @@ TypeScript CLI client. Cross-workspace conventions in
 ## API consumption
 
 Tokens come from the know.sh identity host: authorization code with PKCE
-over a `127.0.0.1` loopback redirect, `know-cli-development`, and one RFC
-8707 `resource` (`https://mcp.dev.know.sh/`, trailing slash included) on
-every token request, which is what gives the access token its single
-audience. Refreshes name the same resource and no scope; the handle is
-one-time-use and a replay revokes the whole family, so token acquisition is
+over a `127.0.0.1` loopback redirect, and one RFC 8707 `resource`
+(`https://mcp.dev.know.sh/mcp`, the path included, as the MCP server's
+protected-resource metadata names it) on every token request, which is what
+gives the access token its single audience. Tool scopes are requested under
+the host's `mcp:` prefix.
+
+The host has no pre-registered CLI client, so `src/registration.ts` registers
+one through RFC 7591 DCR on first sign-in and keeps it in
+`~/.config/know.sh/client.json`. A token set records its `client_id`; refresh
+and revocation must present that client, not whatever is configured now.
+Before a browser opens, one no-redirect authorize request checks the host
+would serve the sign-in; a refused stored registration is replaced once.
+
+Refreshes name the same resource and no scope; the handle is one-time-use and a replay revokes the whole family, so token acquisition is
 single-flight both inside a process and between processes — every MCP client
 spawns its own `mcp-proxy` over one `tokens.json`, so the file lock in
 `src/lock.ts` is the half that matters. That lock heartbeats while it is held

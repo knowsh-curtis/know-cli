@@ -1,8 +1,10 @@
 /**
- * know.sh CLI — baked-in public OAuth client configuration.
+ * know.sh CLI — OAuth configuration for the know.sh identity host.
  *
- * The client_id is a PUBLIC identifier for a Native app (Authorization Code + PKCE,
- * no client secret). It's safe to ship verbatim.
+ * The CLI is a public native client (Authorization Code + PKCE, no secret). The
+ * host has no pre-registered client for it, so by default the CLI registers
+ * itself through RFC 7591 dynamic client registration (`src/registration.ts`);
+ * KNOWSH_CLIENT_ID names a pre-registered client instead.
  *
  * Defaults name the development realm because it is the only know.sh identity
  * realm that exists; the production realm (https://id.know.sh) is registered in
@@ -11,6 +13,8 @@
 
 const IDENTITY_SCOPES = ['openid', 'profile', 'offline_access'];
 
+// The host lets a scope name belong to one API resource only, so the MCP
+// resource carries its tool scopes under `mcp:`; know-mcp accepts either form.
 const MCP_SCOPES = [
   'research:read',
   'research:write',
@@ -20,13 +24,17 @@ const MCP_SCOPES = [
   'campaigns:write',
   'operations:read',
   'operations:write',
-];
+].map((scope) => `mcp:${scope}`);
 
 export const DEFAULTS = {
   issuer: 'https://id.dev.know.sh',
-  clientId: 'know-cli-development',
-  /** RFC 8707 resource indicator. The trailing slash is part of the identifier. */
-  resource: 'https://mcp.dev.know.sh/',
+  /** Shown on the host's sign-in page and in its registration records. */
+  clientName: 'know.sh CLI',
+  /**
+   * RFC 8707 resource indicator: the MCP endpoint, exactly as its protected
+   * resource metadata names it. The host matches it including the path.
+   */
+  resource: 'https://mcp.dev.know.sh/mcp',
   scopes: [...IDENTITY_SCOPES, ...MCP_SCOPES].join(' '),
   mcpUrl: 'https://mcp.dev.know.sh/mcp',
 } as const;
@@ -59,7 +67,9 @@ export const REQUEST_TIMEOUT_MS = 15_000;
 export interface LoopbackConfig {
   mode: 'loopback';
   issuer: string;
-  clientId: string;
+  /** A pre-registered client. Unset, the CLI uses its own dynamic registration. */
+  clientId?: string;
+  clientName: string;
   resource: string;
   scopes: string;
   mcpUrl: string;
@@ -109,7 +119,8 @@ export function resolveConfig(env: Env = process.env): CliConfig {
   return {
     mode: 'loopback',
     issuer: env.KNOWSH_ISSUER ?? DEFAULTS.issuer,
-    clientId: env.KNOWSH_CLIENT_ID ?? DEFAULTS.clientId,
+    ...(env.KNOWSH_CLIENT_ID ? { clientId: env.KNOWSH_CLIENT_ID } : {}),
+    clientName: DEFAULTS.clientName,
     resource: env.KNOWSH_RESOURCE ?? DEFAULTS.resource,
     scopes: env.KNOWSH_SCOPES ?? DEFAULTS.scopes,
     mcpUrl: env.KNOWSH_MCP_URL ?? DEFAULTS.mcpUrl,
@@ -134,6 +145,7 @@ export function identityEndpoints(issuer: string) {
     authorize: `${base}/connect/authorize`,
     token: `${base}/connect/token`,
     revocation: `${base}/connect/revocation`,
+    registration: `${base}/connect/register`,
   };
 }
 

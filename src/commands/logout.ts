@@ -27,8 +27,10 @@ export async function logoutCommand(deps: LogoutDeps = {}): Promise<number> {
           'clearing them locally without revoking.',
       );
     } else if (config.mode === 'loopback' && stored?.refresh_token) {
+      const clientId = stored.client_id ?? config.clientId;
       try {
-        await (deps.revoke ?? revokeToken)(config, stored.refresh_token);
+        if (!clientId) throw new Error('the stored token set names no client; nothing revoked');
+        await (deps.revoke ?? revokeToken)(config, stored.refresh_token, clientId);
         console.log('Revoked the refresh token.');
       } catch (err) {
         // A server-side failure must not strand the tokens on disk.

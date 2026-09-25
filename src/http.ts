@@ -23,3 +23,12 @@ export function postForm(
     signal: AbortSignal.timeout(timeoutMs),
   });
 }
+
+export function postJson(endpoint: string, payload: unknown, timeoutMs: number): Promise<Response> {
+  return fetch(endpoint, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', accept: 'application/json' },
+    body: JSON.stringify(payload),
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+}

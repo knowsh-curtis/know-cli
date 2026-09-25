@@ -2,9 +2,14 @@ import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { DEFAULTS, REQUEST_TIMEOUT_MS, type LoopbackConfig } from '../src/config.js';
 
+/** Registered on every fake host, as a pre-registered client would be. */
+export const STATIC_CLIENT_ID = 'know-cli-test';
+
 export interface RecordedRequest {
   path: string;
   form: URLSearchParams;
+  /** The body of a JSON request, such as a client registration. */
+  json?: Record<string, unknown>;
 }
 
 export interface FakeIdentityHost {
@@ -13,10 +18,15 @@ export interface FakeIdentityHost {
   /** Refresh handles the host still honours. */
   handles: Set<string>;
   authorizationCodes: Map<string, string>;
+  /** Client ids the host knows; deleting one is how a registration is revoked. */
+  clients: Set<string>;
+  /** When set, every authorization request lands on the host's error page. */
+  refuseAuthorization: boolean;
   /** True once a handle from this family was replayed or revoked. */
   familyRevoked(handle: string): boolean;
   config(overrides?: Partial<LoopbackConfig>): LoopbackConfig;
   tokenRequests(grantType: string): RecordedRequest[];
+  registrations(): RecordedRequest[];
   close(): Promise<void>;
 }
 
@@ -59,7 +69,9 @@ export async function startFakeIdentityHost(): Promise<FakeIdentityHost> {
   const handles = new Set<string>();
   const authorizationCodes = new Map<string, string>();
   authorizationCodes.set('code-1', 'refresh-1');
+  const clients = new Set<string>([STATIC_CLIENT_ID]);
   let minted = 0;
+  let registered = 0;
 
   // ReplaySafeRefreshTokenService: one-time use, and replaying a spent handle
   // revokes every handle in its family (DESIGN §6.3).
@@ -82,9 +94,34 @@ export async function startFakeIdentityHost(): Promise<FakeIdentityHost> {
 
   const server = http.createServer((req, res) => {
     void (async () => {
-      const path = new URL(req.url ?? '/', 'http://127.0.0.1').pathname;
-      const form = new URLSearchParams(await readBody(req));
-      requests.push({ path, form });
+      const url = new URL(req.url ?? '/', 'http://127.0.0.1');
+      const path = url.pathname;
+      const body = await readBody(req);
+      const isJson = (req.headers['content-type'] ?? '').startsWith('application/json');
+      const form = isJson ? new URLSearchParams() : new URLSearchParams(body);
+      requests.push({ path, form, ...(isJson ? { json: JSON.parse(body) as Record<string, unknown> } : {}) });
+
+      if (path === '/connect/authorize') {
+        // Like IdentityServer: an unknown client never reaches the redirect,
+        // only the host's own error page; a known one is sent to sign in.
+        const known = clients.has(url.searchParams.get('client_id') ?? '');
+        const target = !host.refuseAuthorization && known ? '/account/login?ReturnUrl=x' : '/account/error?errorId=x';
+        res.writeHead(302, { location: target, 'content-length': 0 });
+        res.end();
+        return;
+      }
+
+      if (path === '/connect/register') {
+        const clientId = `client-${(registered += 1)}`;
+        clients.add(clientId);
+        json(res, 201, { client_id: clientId, token_endpoint_auth_method: 'none' });
+        return;
+      }
+
+      if (path === '/connect/token' && !clients.has(form.get('client_id') ?? '')) {
+        json(res, 400, { error: 'invalid_client' });
+        return;
+      }
 
       if (path === '/connect/token') {
         const grantType = form.get('grant_type');
@@ -161,11 +198,13 @@ export async function startFakeIdentityHost(): Promise<FakeIdentityHost> {
 
   const issuer = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 
-  return {
+  const host: FakeIdentityHost = {
     issuer,
     requests,
     handles,
     authorizationCodes,
+    clients,
+    refuseAuthorization: false,
     familyRevoked: (handle: string) => {
       const family = familyOf.get(handle);
       return family !== undefined && revokedFamilies.has(family);
@@ -173,7 +212,8 @@ export async function startFakeIdentityHost(): Promise<FakeIdentityHost> {
     config: (overrides = {}) => ({
       mode: 'loopback',
       issuer,
-      clientId: DEFAULTS.clientId,
+      clientId: STATIC_CLIENT_ID,
+      clientName: DEFAULTS.clientName,
       resource: DEFAULTS.resource,
       scopes: DEFAULTS.scopes,
       mcpUrl: DEFAULTS.mcpUrl,
@@ -182,9 +222,11 @@ export async function startFakeIdentityHost(): Promise<FakeIdentityHost> {
     }),
     tokenRequests: (grantType: string) =>
       requests.filter((r) => r.path === '/connect/token' && r.form.get('grant_type') === grantType),
+    registrations: () => requests.filter((r) => r.path === '/connect/register'),
     close: async () => {
       server.closeAllConnections();
       await new Promise<void>((resolve) => server.close(() => resolve()));
     },
   };
+  return host;
 }

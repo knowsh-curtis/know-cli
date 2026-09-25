@@ -7,7 +7,7 @@ import { after, before, describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { InvalidGrantError, refreshTokens } from '../src/oauth.js';
 import { loadTokens, saveTokens, type TokenSet } from '../src/tokens.js';
-import { startFakeIdentityHost, type FakeIdentityHost } from './fake-identity-host.js';
+import { STATIC_CLIENT_ID, startFakeIdentityHost, type FakeIdentityHost } from './fake-identity-host.js';
 
 const repoRoot = fileURLToPath(new URL('..', import.meta.url));
 
@@ -27,6 +27,7 @@ describe('two proxies over one token file', () => {
     configHome = await mkdtemp(path.join(os.tmpdir(), 'know-cli-proxies-'));
     process.env.XDG_CONFIG_HOME = configHome;
     process.env.KNOWSH_ISSUER = host.issuer;
+    process.env.KNOWSH_CLIENT_ID = STATIC_CLIENT_ID;
     delete process.env.KNOWSH_LEGACY_DEVICE_FLOW;
   });
 

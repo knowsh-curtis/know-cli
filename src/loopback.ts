@@ -1,8 +1,8 @@
 /**
  * One-shot loopback redirect receiver for the authorization code flow.
  *
- * `know-cli-development` registers `http://127.0.0.1/oauth/callback` and the
- * host matches it at any ephemeral port, so the CLI binds 127.0.0.1:0 and reads
+ * The CLI's client registers `http://127.0.0.1/oauth/callback` and the host
+ * matches it at any ephemeral port, so the CLI binds 127.0.0.1:0 and reads
  * the assigned port back. Exactly one callback is served, then the listener is
  * gone: a second authorization response has nothing to talk to.
  */

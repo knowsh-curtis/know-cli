@@ -8,16 +8,18 @@ import { isTimeout, postForm, timedOut } from './http.js';
 
 export type TokenTypeHint = 'refresh_token' | 'access_token';
 
+/** `clientId` is the client the token was issued to; the host revokes nothing for another. */
 export async function revokeToken(
   config: LoopbackConfig,
   token: string,
+  clientId: string,
   hint: TokenTypeHint = 'refresh_token',
 ): Promise<void> {
   let res: Response;
   try {
     res = await postForm(
       identityEndpoints(config.issuer).revocation,
-      new URLSearchParams({ token, token_type_hint: hint, client_id: config.clientId }),
+      new URLSearchParams({ token, token_type_hint: hint, client_id: clientId }),
       config.requestTimeoutMs,
     );
   } catch (err) {

@@ -94,7 +94,7 @@ async function refreshUnderLock(
   }
 
   try {
-    return await persist(await refresh(config, handle));
+    return await persist(await refresh(config, handle, state.tokens.client_id));
   } catch (err) {
     if (!(err instanceof InvalidGrantError)) throw err;
   }
@@ -112,7 +112,7 @@ async function refreshUnderLock(
     state.tokens = rotated;
     if (isFresh(rotated)) return rotated.access_token;
     try {
-      return await persist(await refresh(config, rotated.refresh_token));
+      return await persist(await refresh(config, rotated.refresh_token, rotated.client_id));
     } catch (err) {
       if (!(err instanceof InvalidGrantError)) throw err;
     }

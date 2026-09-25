@@ -65,17 +65,32 @@ The server is named `know-dev` because it addresses the dev environment.
 
 ## Token audience
 
-Every token request names one RFC 8707 resource,
-`https://mcp.dev.know.sh/` — the trailing slash is part of the identifier —
-so the access token carries exactly that audience. Refreshes name the same
-resource and no scope. The requested scope is `openid profile offline_access`
-plus the eight MCP scopes; the host issues no `email` claim and grants no
-`email` scope.
+Every token request names one RFC 8707 resource, the MCP endpoint
+`https://mcp.dev.know.sh/mcp` exactly as its protected-resource metadata
+names it, so the access token carries exactly that audience. Refreshes name
+the same resource and no scope. The requested scope is `openid profile
+offline_access` plus the eight MCP scopes, which the identity host names
+under `mcp:` (`mcp:research:read`, …); the host issues no `email` claim and
+grants no `email` scope.
+
+## Client registration
+
+The identity host has no pre-registered client for the CLI. On the first
+`login` the CLI registers itself through RFC 7591 dynamic client
+registration — a public native client (no secret) whose only redirect is
+`http://127.0.0.1/oauth/callback`, which the host matches at any port — and
+keeps the result in `~/.config/know.sh/client.json` (mode 0600). Later
+sign-ins reuse it. Before opening the browser the CLI asks the host once,
+without following redirects, whether it would serve the request; if the host
+no longer knows a stored registration it registers again, once, and if it
+refuses a fresh one the CLI stops with the reason instead of waiting on a
+browser that shows an error page. Each token set records the `client_id` it
+was issued to, and refresh and revocation present that one.
 
 ## Security model
 
-- The CLI's `client_id` is a PUBLIC identifier for a Native app (PKCE, no
-  secret). Safe to distribute in the bundle.
+- The CLI's `client_id` is a PUBLIC identifier for a native app (PKCE, no
+  secret), registered per machine; `client.json` holds no secret.
 - Refresh tokens are one-time-use: every renewal rotates the handle, and
   replaying a spent one revokes the whole family. Each MCP client runs its own
   `mcp-proxy` over the same token file, so renewal is serialised by a lock file
@@ -105,9 +120,10 @@ plus the eight MCP scopes; the host issues no `email` claim and grants no
 Environment variables:
 
 - `KNOWSH_ISSUER` — default `https://id.dev.know.sh`.
-- `KNOWSH_CLIENT_ID` — default `know-cli-development`.
-- `KNOWSH_RESOURCE` — default `https://mcp.dev.know.sh/`.
-- `KNOWSH_SCOPES` — default `openid profile offline_access research:read research:write findings:read findings:write campaigns:read campaigns:write operations:read operations:write`.
+- `KNOWSH_CLIENT_ID` — a pre-registered client to use instead of the dynamic
+  registration; unset by default.
+- `KNOWSH_RESOURCE` — default `https://mcp.dev.know.sh/mcp`.
+- `KNOWSH_SCOPES` — default `openid profile offline_access mcp:research:read mcp:research:write mcp:findings:read mcp:findings:write mcp:campaigns:read mcp:campaigns:write mcp:operations:read mcp:operations:write`.
 - `KNOWSH_MCP_URL` — default `https://mcp.dev.know.sh/mcp`.
 - `KNOWSH_HTTP_TIMEOUT_MS` — deadline for one request to the identity host,
   default `15000`.

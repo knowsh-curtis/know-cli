@@ -15,16 +15,19 @@ export interface TokenSet {
   scope?: string;
   /** Echo of the issuer so we can detect tenant changes. */
   iss?: string;
+  /** The client the handle was issued to; refresh and revocation must present it. */
+  client_id?: string;
 }
 
-function tokensDir(): string {
+/** `~/.config/know.sh`, which also holds the client registration. */
+export function configDir(): string {
   const xdg = process.env.XDG_CONFIG_HOME;
   const base = xdg && xdg.length > 0 ? xdg : path.join(os.homedir(), '.config');
   return path.join(base, 'know.sh');
 }
 
 export function tokensPath(): string {
-  return path.join(tokensDir(), 'tokens.json');
+  return path.join(configDir(), 'tokens.json');
 }
 
 /** Held while a process rotates the handle in `tokens.json`; see `src/lock.ts`. */
@@ -33,7 +36,7 @@ export function tokensLockPath(): string {
 }
 
 export async function saveTokens(tokens: TokenSet): Promise<void> {
-  const dir = tokensDir();
+  const dir = configDir();
   await fs.mkdir(dir, { recursive: true, mode: 0o700 });
   const file = tokensPath();
   await fs.writeFile(file, JSON.stringify(tokens, null, 2), { mode: 0o600 });

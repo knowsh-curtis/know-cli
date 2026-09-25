@@ -15,6 +15,7 @@ import {
   startFakeIdentityHost,
   type BlackHoleHost,
   type FakeIdentityHost,
+  STATIC_CLIENT_ID,
 } from './fake-identity-host.js';
 
 describe('revocation', () => {
@@ -28,6 +29,7 @@ describe('revocation', () => {
     configHome = await mkdtemp(path.join(os.tmpdir(), 'know-cli-test-'));
     process.env.XDG_CONFIG_HOME = configHome;
     process.env.KNOWSH_ISSUER = host.issuer;
+    process.env.KNOWSH_CLIENT_ID = STATIC_CLIENT_ID;
     delete process.env.KNOWSH_LEGACY_DEVICE_FLOW;
     console.log = () => {};
     console.error = () => {};
@@ -45,12 +47,12 @@ describe('revocation', () => {
     const config = host.config();
     host.handles.add('refresh-9');
 
-    await revokeToken(config, 'refresh-9');
+    await revokeToken(config, 'refresh-9', STATIC_CLIENT_ID);
 
     const revocation = host.requests.find((r) => r.path === '/connect/revocation');
     assert.equal(revocation?.form.get('token'), 'refresh-9');
     assert.equal(revocation?.form.get('token_type_hint'), 'refresh_token');
-    assert.equal(revocation?.form.get('client_id'), 'know-cli-development');
+    assert.equal(revocation?.form.get('client_id'), STATIC_CLIENT_ID);
 
     await assert.rejects(refreshTokens(config, 'refresh-9'), InvalidGrantError);
   });
@@ -123,7 +125,7 @@ describe('revocation', () => {
     const blackHole: BlackHoleHost = await startBlackHoleHost();
     try {
       await assert.rejects(
-        revokeToken(host.config({ issuer: blackHole.issuer, requestTimeoutMs: 150 }), 'refresh-5'),
+        revokeToken(host.config({ issuer: blackHole.issuer, requestTimeoutMs: 150 }), 'refresh-5', STATIC_CLIENT_ID),
         /revocation timed out after 150 ms/,
       );
     } finally {
