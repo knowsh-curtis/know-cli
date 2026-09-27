@@ -1,17 +1,47 @@
 /**
- * know.sh CLI — baked-in public OAuth client configuration.
+ * know.sh CLI — OAuth configuration for the know.sh identity host.
  *
- * The client_id is a PUBLIC identifier for a Native app (Authorization Code + PKCE,
- * no client secret). It's safe to ship verbatim.
+ * The CLI is a public native client (Authorization Code + PKCE, no secret). The
+ * host has no pre-registered client for it, so by default the CLI registers
+ * itself through RFC 7591 dynamic client registration (`src/registration.ts`);
+ * KNOWSH_CLIENT_ID names a pre-registered client instead.
  *
- * Dev and prod share a tenant today; once we split we'll add a --env flag
- * or derive from mcpUrl.
+ * Defaults name the development realm because it is the only know.sh identity
+ * realm that exists; the production realm (https://id.know.sh) is registered in
+ * the contract but not deployed. Every value has an environment override.
  */
+
+const IDENTITY_SCOPES = ['openid', 'profile', 'offline_access'];
+
+// The host lets a scope name belong to one API resource only, so the MCP
+// resource carries its tool scopes under `mcp:`; know-mcp accepts either form.
+const MCP_SCOPES = [
+  'documents:read',
+  'documents:write',
+  'sections:read',
+  'sections:write',
+  'campaigns:read',
+  'campaigns:write',
+  'operations:read',
+  'operations:write',
+].map((scope) => `mcp:${scope}`);
+
 export const DEFAULTS = {
+  issuer: 'https://id.dev.know.sh',
+  /** Shown on the host's sign-in page and in its registration records. */
+  clientName: 'know.sh CLI',
+  /**
+   * RFC 8707 resource indicator: the MCP endpoint, exactly as its protected
+   * resource metadata names it. The host matches it including the path.
+   */
+  resource: 'https://mcp.dev.know.sh/mcp',
+  scopes: [...IDENTITY_SCOPES, ...MCP_SCOPES].join(' '),
+  mcpUrl: 'https://mcp.dev.know.sh/mcp',
+} as const;
+
+/** Auth0, reachable only through KNOWSH_LEGACY_DEVICE_FLOW until the tenant retires. */
+export const LEGACY_DEFAULTS = {
   auth0Domain: 'dev-hcpmhp1w4f2455pb.us.auth0.com',
-  // know.sh CLI — Native application, no client secret, uses
-  // OAuth 2.0 Device Authorization Flow (RFC 8628). Auth0's own
-  // recommendation for CLIs; avoids the loopback port-match quirks.
   auth0ClientId: 'rEsn27jbd8IAD7k1JkRsES3pEKFwyjJd',
   audience: 'https://mcp.know.sh',
   scopes: [
@@ -19,22 +49,110 @@ export const DEFAULTS = {
     'profile',
     'email',
     'offline_access',
-    'research:read',
-    'research:write',
-    'findings:read',
-    'findings:write',
+    'documents:read',
+    'documents:write',
+    'sections:read',
+    'sections:write',
   ].join(' '),
-  /** Where the hosted MCP server lives. */
   mcpUrl: 'https://mcp.know.sh/mcp',
 } as const;
 
-/** Build-time overrides from env (useful for dev/local testing). */
-export function resolveConfig() {
+/**
+ * No request to the identity host may outlive this. It is the CLI's only
+ * deadline on a black-holed endpoint, and it keeps a token request from
+ * outliving the lock it is held under (`src/lock.ts`).
+ */
+export const REQUEST_TIMEOUT_MS = 15_000;
+
+export interface LoopbackConfig {
+  mode: 'loopback';
+  issuer: string;
+  /** A pre-registered client. Unset, the CLI uses its own dynamic registration. */
+  clientId?: string;
+  clientName: string;
+  resource: string;
+  scopes: string;
+  mcpUrl: string;
+  requestTimeoutMs: number;
+}
+
+export interface DeviceConfig {
+  mode: 'device';
+  auth0Domain: string;
+  auth0ClientId: string;
+  audience: string;
+  scopes: string;
+  mcpUrl: string;
+  requestTimeoutMs: number;
+}
+
+export type CliConfig = LoopbackConfig | DeviceConfig;
+
+type Env = Record<string, string | undefined>;
+
+function flagIsSet(value: string | undefined): boolean {
+  const normalized = value?.trim().toLowerCase();
+  return normalized === '1' || normalized === 'true' || normalized === 'yes';
+}
+
+export function legacyDeviceFlowRequested(env: Env = process.env): boolean {
+  return flagIsSet(env.KNOWSH_LEGACY_DEVICE_FLOW);
+}
+
+function positiveMilliseconds(value: string | undefined, fallback: number): number {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+export function resolveConfig(env: Env = process.env): CliConfig {
+  if (legacyDeviceFlowRequested(env)) {
+    return {
+      mode: 'device',
+      auth0Domain: env.KNOWSH_AUTH0_DOMAIN ?? LEGACY_DEFAULTS.auth0Domain,
+      auth0ClientId: env.KNOWSH_AUTH0_CLIENT_ID ?? LEGACY_DEFAULTS.auth0ClientId,
+      audience: env.KNOWSH_AUDIENCE ?? LEGACY_DEFAULTS.audience,
+      scopes: env.KNOWSH_SCOPES ?? LEGACY_DEFAULTS.scopes,
+      mcpUrl: env.KNOWSH_MCP_URL ?? LEGACY_DEFAULTS.mcpUrl,
+      requestTimeoutMs: positiveMilliseconds(env.KNOWSH_HTTP_TIMEOUT_MS, REQUEST_TIMEOUT_MS),
+    };
+  }
   return {
-    auth0Domain: process.env.KNOWSH_AUTH0_DOMAIN ?? DEFAULTS.auth0Domain,
-    auth0ClientId: process.env.KNOWSH_AUTH0_CLIENT_ID ?? DEFAULTS.auth0ClientId,
-    audience: process.env.KNOWSH_AUDIENCE ?? DEFAULTS.audience,
-    scopes: process.env.KNOWSH_SCOPES ?? DEFAULTS.scopes,
-    mcpUrl: process.env.KNOWSH_MCP_URL ?? DEFAULTS.mcpUrl,
+    mode: 'loopback',
+    issuer: env.KNOWSH_ISSUER ?? DEFAULTS.issuer,
+    ...(env.KNOWSH_CLIENT_ID ? { clientId: env.KNOWSH_CLIENT_ID } : {}),
+    clientName: DEFAULTS.clientName,
+    resource: env.KNOWSH_RESOURCE ?? DEFAULTS.resource,
+    scopes: env.KNOWSH_SCOPES ?? DEFAULTS.scopes,
+    mcpUrl: env.KNOWSH_MCP_URL ?? DEFAULTS.mcpUrl,
+    requestTimeoutMs: positiveMilliseconds(env.KNOWSH_HTTP_TIMEOUT_MS, REQUEST_TIMEOUT_MS),
+  };
+}
+
+function normalizeDomain(domain: string): string {
+  return domain.replace(/^https?:\/\//, '').replace(/\/+$/, '');
+}
+
+/** The `iss` value tokens from this configuration carry. */
+export function issuerFor(config: CliConfig): string {
+  return config.mode === 'loopback'
+    ? config.issuer.replace(/\/+$/, '')
+    : `https://${normalizeDomain(config.auth0Domain)}/`;
+}
+
+export function identityEndpoints(issuer: string) {
+  const base = issuer.replace(/\/+$/, '');
+  return {
+    authorize: `${base}/connect/authorize`,
+    token: `${base}/connect/token`,
+    revocation: `${base}/connect/revocation`,
+    registration: `${base}/connect/register`,
+  };
+}
+
+export function legacyEndpoints(auth0Domain: string) {
+  const base = `https://${normalizeDomain(auth0Domain)}`;
+  return {
+    deviceCode: `${base}/oauth/device/code`,
+    token: `${base}/oauth/token`,
   };
 }
