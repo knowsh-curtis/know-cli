@@ -13,9 +13,9 @@ npx @know.sh/cli login        # opens your browser
 npx @know.sh/cli install      # adds the MCP server to Claude Code
 ```
 
-Restart Claude Code. Your research docs and findings are now available as
-MCP tools: `research.list`, `research.get`, `research.create`,
-`research.update_overview`, `finding.add`, `finding.update`, `finding.delete`,
+Restart Claude Code. Your documents and sections are now available as
+MCP tools: `document.list`, `document.get`, `document.create`,
+`document.update_overview`, `section.add`, `section.update`, `section.delete`,
 `search`, …
 
 ## Install as a Claude Code plugin
@@ -70,7 +70,7 @@ Every token request names one RFC 8707 resource, the MCP endpoint
 names it, so the access token carries exactly that audience. Refreshes name
 the same resource and no scope. The requested scope is `openid profile
 offline_access` plus the eight MCP scopes, which the identity host names
-under `mcp:` (`mcp:research:read`, …); the host issues no `email` claim and
+under `mcp:` (`mcp:documents:read`, …); the host issues no `email` claim and
 grants no `email` scope.
 
 ## Client registration
@@ -123,7 +123,7 @@ Environment variables:
 - `KNOWSH_CLIENT_ID` — a pre-registered client to use instead of the dynamic
   registration; unset by default.
 - `KNOWSH_RESOURCE` — default `https://mcp.dev.know.sh/mcp`.
-- `KNOWSH_SCOPES` — default `openid profile offline_access mcp:research:read mcp:research:write mcp:findings:read mcp:findings:write mcp:campaigns:read mcp:campaigns:write mcp:operations:read mcp:operations:write`.
+- `KNOWSH_SCOPES` — default `openid profile offline_access mcp:documents:read mcp:documents:write mcp:sections:read mcp:sections:write mcp:campaigns:read mcp:campaigns:write mcp:operations:read mcp:operations:write`.
 - `KNOWSH_MCP_URL` — default `https://mcp.dev.know.sh/mcp`.
 - `KNOWSH_HTTP_TIMEOUT_MS` — deadline for one request to the identity host,
   default `15000`.

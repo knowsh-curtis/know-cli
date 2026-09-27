@@ -10,7 +10,7 @@
     {
       "name": "know-dev",
       "source": "./",
-      "description": "Connects Claude Code to the know.sh dev MCP server (research docs, findings, campaigns) over OAuth."
+      "description": "Connects Claude Code to the know.sh dev MCP server (documents, sections, shelves, campaigns) over OAuth."
     }
   ]
 }

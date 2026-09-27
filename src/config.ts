@@ -16,10 +16,10 @@ const IDENTITY_SCOPES = ['openid', 'profile', 'offline_access'];
 // The host lets a scope name belong to one API resource only, so the MCP
 // resource carries its tool scopes under `mcp:`; know-mcp accepts either form.
 const MCP_SCOPES = [
-  'research:read',
-  'research:write',
-  'findings:read',
-  'findings:write',
+  'documents:read',
+  'documents:write',
+  'sections:read',
+  'sections:write',
   'campaigns:read',
   'campaigns:write',
   'operations:read',
@@ -49,10 +49,10 @@ export const LEGACY_DEFAULTS = {
     'profile',
     'email',
     'offline_access',
-    'research:read',
-    'research:write',
-    'findings:read',
-    'findings:write',
+    'documents:read',
+    'documents:write',
+    'sections:read',
+    'sections:write',
   ].join(' '),
   mcpUrl: 'https://mcp.know.sh/mcp',
 } as const;

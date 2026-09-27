@@ -2,7 +2,7 @@
   "name": "@know.sh/cli",
   "version": "0.1.0",
   "description": "know.sh CLI — authenticates and installs the know.sh MCP server into your MCP client.",
-  "keywords": ["mcp", "know.sh", "auth0", "research"],
+  "keywords": ["mcp", "know.sh", "auth0", "documents", "sections", "shelves"],
   "homepage": "https://know.sh",
   "repository": {
     "type": "git",

@@ -79,10 +79,10 @@ describe('authorize request', () => {
       'openid',
       'profile',
       'offline_access',
-      'mcp:research:read',
-      'mcp:research:write',
-      'mcp:findings:read',
-      'mcp:findings:write',
+      'mcp:documents:read',
+      'mcp:documents:write',
+      'mcp:sections:read',
+      'mcp:sections:write',
       'mcp:campaigns:read',
       'mcp:campaigns:write',
       'mcp:operations:read',
@@ -297,7 +297,7 @@ describe('dynamic client registration', () => {
   });
 
   it('registers again when the configured scopes outgrow the stored registration', async () => {
-    await loginWithLoopback(host.config({ clientId: undefined, scopes: 'openid mcp:research:read' }), {
+    await loginWithLoopback(host.config({ clientId: undefined, scopes: 'openid mcp:documents:read' }), {
       ...quiet,
       openBrowser: (url) => answerTheBrowser(url),
     });
